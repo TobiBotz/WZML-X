@@ -27,6 +27,7 @@ class TgClient:
         kwargs["proxy"] = Config.TG_PROXY
         kwargs["parse_mode"] = enums.ParseMode.HTML
         kwargs["in_memory"] = True
+        kwargs["sleep_threshold"] = 50
         for param, value in {
             "max_concurrent_transmissions": 100,
             "skip_updates": False,
