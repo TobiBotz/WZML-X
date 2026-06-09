@@ -4,6 +4,7 @@ from time import time
 from mimetypes import guess_type
 from contextlib import suppress
 from os import path as ospath
+from pyrogram.enums import ButtonStyle
 
 from aiofiles.os import listdir, remove, path as aiopath
 from requests import utils as rutils
@@ -41,16 +42,10 @@ from ..ext_utils.files_utils import (
 from ..ext_utils.links_utils import is_gdrive_id
 from ..ext_utils.status_utils import get_readable_file_size, get_readable_time
 from ..ext_utils.task_manager import check_running_tasks, start_from_queued
-from ..mirror_leech_utils.uphoster_utils.uploaders_utils.gofile_uploader import GoFileUpload
-from ..mirror_leech_utils.uphoster_utils.uploaders_utils.buzzheavier_uploader import (
-    BuzzHeavierUpload,
-)
-from ..mirror_leech_utils.uphoster_utils.uploaders_utils.pixeldrain_uploader import (
-    PixelDrainUpload,
-)
 from ..mirror_leech_utils.uphoster_utils.multi_upload import MultiUphosterUpload
 from ..mirror_leech_utils.gdrive_utils.upload import GoogleDriveUpload
 from ..mirror_leech_utils.rclone_utils.transfer import RcloneTransferHelper
+from ..mirror_leech_utils.upload_utils.mega_upload import add_mega_upload
 from ..mirror_leech_utils.status_utils.uphoster_status import UphosterStatus
 from ..mirror_leech_utils.status_utils.gdrive_status import (
     GoogleDriveStatus,
@@ -121,11 +116,13 @@ class TaskListener(TaskConfig):
             )
         if (
             self.is_super_chat
-            and Config.INCOMPLETE_TASK_NOTIFIER
+            and (Config.INC_TASK_NOTIFY or Config.INC_TASK_RESUME)
             and Config.DATABASE_URL
         ):
             await database.add_incomplete_task(
-                self.message.chat.id, self.message.link, self.tag
+                self.message.chat.id, self.message.link, self.tag,
+                self.message.text or "", self.user_id,
+                self.message.reply_to_message.id if self.message.reply_to_message else 0,
             )
 
     async def on_download_complete(self):
@@ -382,6 +379,11 @@ class TaskListener(TaskConfig):
                 sync_to_async(drive.upload),
             )
             del drive
+        elif self.up_dest == "mega:":
+            LOGGER.info(f"Mega Upload Name: {self.name}")
+            mega_email = self.user_dict.get("MEGA_EMAIL") or ""
+            mega_password = self.user_dict.get("MEGA_PASSWORD") or ""
+            await add_mega_upload(self, up_path, mega_email, mega_password, gid)
         else:
             LOGGER.info(f"Rclone Upload Name: {self.name}")
             RCTransfer = RcloneTransferHelper(self)
@@ -399,7 +401,7 @@ class TaskListener(TaskConfig):
     ):
         if (
             self.is_super_chat
-            and Config.INCOMPLETE_TASK_NOTIFIER
+            and (Config.INC_TASK_NOTIFY or Config.INC_TASK_RESUME)
             and Config.DATABASE_URL
         ):
             await database.rm_complete_task(self.message.link)
@@ -417,12 +419,14 @@ class TaskListener(TaskConfig):
                 msg += "\n┠ <b>Type</b> → Playlist"
                 msg += f"\n┖ <b>Total Videos</b> → {files}"
                 if link:
-                    buttons.url_button("🔗 View Playlist", link)
+                    buttons.url_button(
+                        "🔗 View Playlist", link, style=ButtonStyle.PRIMARY
+                    )
                 user_message = f"{self.tag}\nYour playlist ({files} videos) has been uploaded to YouTube successfully!"
             else:
                 msg += "\n┖ <b>Type</b> → Video"
                 if link:
-                    buttons.url_button("🔗 View Video", link)
+                    buttons.url_button("🔗 View Video", link, style=ButtonStyle.PRIMARY)
                 user_message = (
                     f"{self.tag}\nYour video has been uploaded to YouTube successfully!"
                 )
@@ -437,7 +441,7 @@ class TaskListener(TaskConfig):
             await send_message(self.message, user_message, button)
 
         elif self.is_leech:
-            msg += f"\n<b>Total Files: </b>{folders}"
+            msg += f"\n┠ <b>Total Files: </b>{folders}"
             if mime_type != 0:
                 msg += f"\n┠ <b>Corrupted Files</b> → {mime_type}"
             msg += f"\n┖ <b>Task By</b> → {self.tag}\n\n"
@@ -503,7 +507,11 @@ class TaskListener(TaskConfig):
             ):
                 buttons = ButtonMaker()
                 if link and Config.SHOW_CLOUD_LINK:
-                    buttons.url_button("☁️ Cloud Link", link)
+                    if "mega.nz" in link:
+                        btn_label = "🔗 Mega Link"
+                    else:
+                        btn_label = "☁️ Cloud Link"
+                    buttons.url_button(btn_label, link, style=ButtonStyle.PRIMARY)
                 elif multi_links:
                     for name, url in multi_links:
                         buttons.url_button(name, url)
@@ -515,7 +523,9 @@ class TaskListener(TaskConfig):
                     share_url = f"{Config.RCLONE_SERVE_URL}/{remote}/{url_path}"
                     if mime_type == "Folder":
                         share_url += "/"
-                    buttons.url_button("🔗 Rclone Link", share_url)
+                    buttons.url_button(
+                        "🔗 Rclone Link", share_url, style=ButtonStyle.PRIMARY
+                    )
                 if not rclone_path and dir_id:
                     INDEX_URL = ""
                     if self.private_link:
@@ -525,13 +535,19 @@ class TaskListener(TaskConfig):
                     if INDEX_URL and self.name:
                         safe_name = rutils.quote(self.name.strip("/"))
                         share_url = f"{INDEX_URL}/{safe_name}"
-                        buttons.url_button("⚡ Index Link", share_url)
+                        if mime_type == "Folder":
+                            share_url += "/"
+                        buttons.url_button(
+                            "⚡ Index Link", share_url, style=ButtonStyle.PRIMARY
+                        )
                         if mime_type.startswith(("image", "video", "audio")):
                             share_urls = f"{share_url}?a=view"
-                            buttons.url_button("🌐 View Link", share_urls)
+                            buttons.url_button(
+                                "🌐 View Link", share_urls, style=ButtonStyle.PRIMARY
+                            )
                 button = buttons.build_menu(2)
             else:
-                if not multi_link_msg:
+                if not multi_link_msg and rclone_path:
                     msg += f"\n┃\n┠ Path: <code>{rclone_path}</code>"
                 button = None
             msg += f"\n┃\n┖ <b>Task By</b> → {self.tag}\n\n"
@@ -610,7 +626,7 @@ class TaskListener(TaskConfig):
 
         if (
             self.is_super_chat
-            and Config.INCOMPLETE_TASK_NOTIFIER
+            and (Config.INC_TASK_NOTIFY or Config.INC_TASK_RESUME)
             and Config.DATABASE_URL
         ):
             await database.rm_complete_task(self.message.link)
@@ -648,7 +664,7 @@ class TaskListener(TaskConfig):
 
         if (
             self.is_super_chat
-            and Config.INCOMPLETE_TASK_NOTIFIER
+            and (Config.INC_TASK_NOTIFY or Config.INC_TASK_RESUME)
             and Config.DATABASE_URL
         ):
             await database.rm_complete_task(self.message.link)

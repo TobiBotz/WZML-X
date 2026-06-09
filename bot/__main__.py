@@ -29,6 +29,10 @@ async def main():
 
     await load_settings()
 
+    from .helper.telegram_helper.bot_commands import BotCommands
+
+    BotCommands.refresh_commands()
+
     try:
         tz = timezone(Config.TIMEZONE)
     except Exception:
@@ -58,13 +62,13 @@ async def main():
         update_nzb_options(),
     )
     from .core.jdownloader_booter import jdownloader
+    from .helper.ext_utils.bot_utils import search_images
     from .helper.ext_utils.files_utils import clean_all
     from .helper.ext_utils.telegraph_helper import telegraph
     from .helper.mirror_leech_utils.rclone_utils.serve import rclone_serve_booter
     from .modules import (
         get_packages_version,
         initiate_search_tools,
-        restart_notification,
     )
 
     await gather(
@@ -73,9 +77,9 @@ async def main():
         clean_all(),
         initiate_search_tools(),
         get_packages_version(),
-        restart_notification(),
         telegraph.create_account(),
         rclone_serve_booter(),
+        search_images(),
     )
 
 
@@ -88,6 +92,10 @@ from .helper.listeners.aria2_listener import add_aria2_callbacks
 add_aria2_callbacks()
 create_help_buttons()
 add_handlers()
+
+from .modules import restart_notification
+
+bot_loop.run_until_complete(restart_notification())
 
 from .core.plugin_manager import get_plugin_manager
 from .modules.plugin_manager import register_plugin_commands

@@ -1,3 +1,4 @@
+from ast import literal_eval
 from base64 import b64encode
 from re import match as re_match
 
@@ -215,7 +216,10 @@ class Mirror(TaskListener):
                 if isinstance(args["-ff"], set):
                     self.ffmpeg_cmds = args["-ff"]
                 else:
-                    self.ffmpeg_cmds = eval(args["-ff"])
+                    value = literal_eval(args["-ff"])
+                    if not isinstance(value, (dict, set, list, tuple)):
+                        raise ValueError("ffmpeg_cmds must be a dict/set/list/tuple")
+                    self.ffmpeg_cmds = value
         except Exception as e:
             self.ffmpeg_cmds = None
             LOGGER.error(e)
@@ -454,7 +458,23 @@ async def jd_mirror(client, message):
 
 
 async def nzb_mirror(client, message):
-    bot_loop.create_task(Mirror(client, message, is_nzb=True).new_event())
+    text_parts = message.text.split()
+    nzb_id = None
+    if len(text_parts) > 1 and not text_parts[1].startswith(("http", "ftp", "/")):
+        potential_id = text_parts[1]
+        clean = potential_id.lstrip("-").replace("_", "")
+        if clean.isalnum() and not (potential_id.startswith("-") and clean.isalpha()):
+            nzb_id = potential_id
+            nzb_url = f"{Config.HYDRA_IP.rstrip('/')}/getnzb/api/{nzb_id}?apikey={Config.HYDRA_API_KEY}"
+            extra = " ".join(text_parts[2:])
+            message.text = f"/nzbmirror {nzb_url} -e {extra}".strip()
+    else:
+        if "-e" not in message.text:
+            message.text += " -e"
+    mirror_task = Mirror(client, message, is_nzb=True)
+    if nzb_id:
+        mirror_task.nzb_id = nzb_id
+    bot_loop.create_task(mirror_task.new_event())
 
 
 async def leech(client, message):
@@ -475,9 +495,23 @@ async def jd_leech(client, message):
 
 
 async def nzb_leech(client, message):
-    bot_loop.create_task(
-        Mirror(client, message, is_leech=True, is_nzb=True).new_event()
-    )
+    text_parts = message.text.split()
+    nzb_id = None
+    if len(text_parts) > 1 and not text_parts[1].startswith(("http", "ftp", "/")):
+        potential_id = text_parts[1]
+        clean = potential_id.lstrip("-").replace("_", "")
+        if clean.isalnum() and not (potential_id.startswith("-") and clean.isalpha()):
+            nzb_id = potential_id
+            nzb_url = f"{Config.HYDRA_IP.rstrip('/')}/getnzb/api/{nzb_id}?apikey={Config.HYDRA_API_KEY}"
+            extra = " ".join(text_parts[2:])
+            message.text = f"/nzbleech {nzb_url} -e {extra}".strip()
+    else:
+        if "-e" not in message.text:
+            message.text += " -e"
+    mirror_task = Mirror(client, message, is_leech=True, is_nzb=True)
+    if nzb_id:
+        mirror_task.nzb_id = nzb_id
+    bot_loop.create_task(mirror_task.new_event())
 
 
 async def uphoster(client, message):

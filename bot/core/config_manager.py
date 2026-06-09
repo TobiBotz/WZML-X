@@ -12,6 +12,7 @@ class Config:
     BOT_MAX_TASKS = 0
     BOT_PM = False
     CMD_SUFFIX = ""
+    COLORED_BTNS = False
     DEFAULT_LANG = "en"
     DATABASE_URL = ""
     DEFAULT_UPLOAD = "rc"
@@ -23,6 +24,7 @@ class Config:
     DISABLE_MULTI = False
     DISABLE_SEED = False
     DISABLE_FF_MODE = False
+    DISABLE_MEGA = False
     EQUAL_SPLITS = False
     EXCLUDED_EXTENSIONS = ""
     FFMPEG_CMDS = {}
@@ -34,13 +36,22 @@ class Config:
     PIXELDRAIN_KEY = ""
     PROTECTED_API = ""
     BUZZHEAVIER_API = ""
+    DEVUPLOADS_KEY = ""
+    DEVUPLOADS_FOLDER = ""
+    VIKINGFILE_HASH = ""
+    VIKINGFILE_FOLDER = ""
     GDRIVE_ID = ""
     GD_DESP = "Uploaded with WZ Bot"
     AUTHOR_NAME = "WZML-X"
     AUTHOR_URL = "https://t.me/WZML_X"
     INSTADL_API = ""
     IMDB_TEMPLATE = ""
-    INCOMPLETE_TASK_NOTIFIER = False
+    IMAGES = []
+    IMG_SEARCH = ""
+    IMG_PAGE = 1
+    USE_IMAGES = False
+    INC_TASK_NOTIFY = False
+    INC_TASK_RESUME = False
     INDEX_URL = ""
     IS_TEAM_DRIVE = False
     JD_EMAIL = ""
@@ -73,6 +84,8 @@ class Config:
     MEDIA_GROUP = False
     HYBRID_LEECH = True
     HYPER_THREADS = 0
+    HYPER_PIPELINE = 32
+    HYPER_CHUNK = 256 * 1024
     HYDRA_IP = ""
     HYDRA_API_KEY = ""
     NAME_SWAP = ""
@@ -118,6 +131,7 @@ class Config:
     USER_TRANSMISSION = True
     USE_SERVICE_ACCOUNTS = False
     WEB_PINCODE = True
+    WZMLX_WEB_SECRET = ""
     YT_DLP_OPTIONS = {}
     YT_DESP = "Uploaded with WZML-X bot"
     YT_TAGS = ["telegram", "bot", "youtube"]

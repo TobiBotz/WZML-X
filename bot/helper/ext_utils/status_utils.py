@@ -1,5 +1,6 @@
 from asyncio import gather, iscoroutinefunction
 from html import escape
+from pyrogram.enums import ButtonStyle
 from re import findall
 from time import time
 
@@ -46,7 +47,7 @@ class EngineStatus:
         self.STATUS_GDAPI = f"Google-API v{ver.get('gapi', 'N/A')}"
         self.STATUS_QBIT = f"qBit v{ver.get('qBittorrent', 'N/A')}"
         self.STATUS_TGRAM = f"Pyro v{ver.get('pyrotgfork', 'N/A')}"
-        self.STATUS_MEGA = f"MegaCMD v{ver.get('mega', 'N/A')}"
+        self.STATUS_MEGA = f"MegaSDK v{ver.get('mega', 'N/A')}"
         self.STATUS_YTDLP = f"yt-dlp v{ver.get('yt-dlp', 'N/A')}"
         self.STATUS_FFMPEG = f"ffmpeg v{ver.get('ffmpeg', 'N/A')}"
         self.STATUS_7Z = f"7z v{ver.get('7z', 'N/A')}"
@@ -83,7 +84,7 @@ async def get_task_by_gid(gid: str):
         for tk in task_dict.values():
             if hasattr(tk, "seeding"):
                 await tk.update()
-            if tk.gid() == gid:
+            if tk.gid() == gid or tk.gid().startswith(gid):
                 return tk
         return None
 
@@ -196,8 +197,11 @@ def get_progress_bar_string(pct):
     pct = float(str(pct).strip("%"))
     p = min(max(pct, 0), 100)
     cFull = int(p // 8)
-    p_str = "⬢" * cFull
-    p_str += "⬡" * (12 - cFull)
+    cPart = int(p % 8 - 1)
+    p_str = "■" * cFull
+    if cPart >= 0:
+        p_str += ["▤", "▥", "▦", "▧", "▨", "▩", "■"][cPart]
+    p_str += "□" * (12 - cFull)
     return f"[{p_str}]"
 
 
@@ -278,7 +282,7 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
         # TODO: Add Bt Sel
         from ..telegram_helper.bot_commands import BotCommands
 
-        msg += f"\n<b>┖ Stop</b> → <i>/{BotCommands.CancelTaskCommand[1]}_{task.gid()}</i>\n\n"
+        msg += f"\n<b>┖ Stop</b> → <i>/{BotCommands.CancelTaskCommand[1]}_{task.gid()[:8]}</i>\n\n"
 
     if len(msg) == 0:
         if status == "All":
@@ -289,7 +293,12 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
     msg += "⌬ <b><u>Bot Stats</u></b>"
     buttons = ButtonMaker()
     if not is_user:
-        buttons.data_button("📜 TStats", f"status {sid} ov", position="header")
+        buttons.data_button(
+            "📜 TStats",
+            f"status {sid} ov",
+            position="header",
+            style=ButtonStyle.PRIMARY,
+        )
     if len(tasks) > STATUS_LIMIT:
         msg += f"<b>Page:</b> {page_no}/{pages} | <b>Tasks:</b> {tasks_no} | <b>Step:</b> {page_step}\n"
         buttons.data_button("<<", f"status {sid} pre", position="header")
@@ -301,7 +310,9 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
         for label, status_value in list(STATUSES.items()):
             if status_value != status:
                 buttons.data_button(label, f"status {sid} st {status_value}")
-    buttons.data_button("♻️ Refresh", f"status {sid} ref", position="header")
+    buttons.data_button(
+        "♻️ Refresh", f"status {sid} ref", position="header", style=ButtonStyle.PRIMARY
+    )
     button = buttons.build_menu(8)
     msg += f"\n┟ <b>CPU</b> → {cpu_percent()}% | <b>F</b> → {get_readable_file_size(disk_usage(DOWNLOAD_DIR).free)} [{round(100 - disk_usage(DOWNLOAD_DIR).percent, 1)}%]"
     msg += f"\n┖ <b>RAM</b> → {virtual_memory().percent}% | <b>UP</b> → {get_readable_time(time() - bot_start_time)}"

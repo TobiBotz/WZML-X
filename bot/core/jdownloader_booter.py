@@ -34,7 +34,7 @@ class JDownloader(MyJdApi):
             self.is_connected = False
             self.error = "JDownloader Credentials not provided!"
             return
-        self.error = "Connecting... Try agin after couple of seconds"
+        self.error = "Connecting... Try again after couple of seconds"
         self._device_name = f"{randint(0, 1000)}@{TgClient.BNAME}"
         if await path.exists("/JDownloader/logs"):
             LOGGER.info(
@@ -55,13 +55,13 @@ class JDownloader(MyJdApi):
             "deprecatedapiport": 3128,
             "localapiserverheaderxcontenttypeoptions": "nosniff",
             "localapiserverheaderxframeoptions": "DENY",
-            "externinterfaceenabled": True,
+            "externinterfaceenabled": False,
             "deprecatedapilocalhostonly": True,
             "localapiserverheaderreferrerpolicy": "no-referrer",
             "deprecatedapienabled": True,
             "localapiserverheadercontentsecuritypolicy": "default-src 'self'",
-            "jdanywhereapienabled": True,
-            "externinterfacelocalhostonly": False,
+            "jdanywhereapienabled": False,
+            "externinterfacelocalhostonly": True,
             "localapiserverheaderxxssprotection": "1; mode=block",
         }
         await makedirs("/JDownloader/cfg", exist_ok=True)
