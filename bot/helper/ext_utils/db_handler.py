@@ -15,8 +15,7 @@ from ...core.tg_client import TgClient, db_partition_id
 def _bot_id():
     if TgClient.ID:
         return str(TgClient.ID)
-    token = getattr(Config, "BOT_TOKEN", "") or ""
-    return token.split(":", 1)[0] or "0"
+    return Config.BOT_TOKEN.split(":", 1)[0]
 
 
 def _part():
@@ -71,6 +70,7 @@ class DbManager:
 
     async def update_config(self, dict_):
         if self._return:
+            LOGGER.warning("update_config skipped: DB not connected")
             return
         await self.db.settings.config.update_one(
             {"_id": _part()}, {"$set": dict_}, upsert=True
@@ -117,7 +117,7 @@ class DbManager:
     async def update_nzb_config(self):
         if self._return:
             return
-        async with aiopen("sabnzbd/SABnzbd.ini", "rb+") as pf:
+        async with aiopen("configs/sabnzbd/SABnzbd.ini", "rb+") as pf:
             nzb_conf = await pf.read()
         await self.db.settings.nzb.replace_one(
             {"_id": _part()}, {"SABnzbd__ini": nzb_conf}, upsert=True
@@ -160,9 +160,7 @@ class DbManager:
                 }
             }
         ]
-        await self.db.users[_part()].update_one(
-            {"_id": user_id}, pipeline, upsert=True
-        )
+        await self.db.users[_part()].update_one({"_id": user_id}, pipeline, upsert=True)
 
     async def update_user_doc(self, user_id, key, path=""):
         if self._return:
@@ -199,7 +197,7 @@ class DbManager:
         await self.db.rss[_part()].delete_one({"_id": user_id})
 
     async def add_incomplete_task(
-        self, cid, link, tag, command="", user_id=0, reply_to_msg_id=0
+        self, cid, link, tag, command="", user_id=0, reply_to_msg_id=0, dump_msg_id=0
     ):
         if self._return:
             return
@@ -214,9 +212,18 @@ class DbManager:
                     "command": command,
                     "user_id": user_id,
                     "reply_to_msg_id": reply_to_msg_id,
+                    "dump_msg_id": dump_msg_id,
                 }
             },
             upsert=True,
+        )
+
+    async def update_task_dump_msg(self, link, dump_chat, dump_msg_id):
+        if self._return:
+            return
+        await self.db.tasks[_part()].update_one(
+            {"link": link},
+            {"$set": {"dump_msg_id": dump_msg_id, "dump_chat": dump_chat}},
         )
 
     async def get_pm_uids(self):
@@ -258,6 +265,8 @@ class DbManager:
                     "command": row.get("command", ""),
                     "user_id": row.get("user_id", 0),
                     "reply_to_msg_id": row.get("reply_to_msg_id", 0),
+                    "dump_msg_id": row.get("dump_msg_id", 0),
+                    "dump_chat": row.get("dump_chat", 0),
                 }
                 if cid in notifier_dict:
                     if tag in notifier_dict[cid]:
@@ -266,8 +275,12 @@ class DbManager:
                         notifier_dict[cid][tag] = [task_data]
                 else:
                     notifier_dict[cid] = {tag: [task_data]}
-        await self.db.tasks[_part()].drop()
         return notifier_dict
+
+    async def drop_incomplete_tasks(self):
+        if self._return:
+            return
+        await self.db.tasks[_part()].drop()
 
     async def trunc_table(self, name):
         if self._return:

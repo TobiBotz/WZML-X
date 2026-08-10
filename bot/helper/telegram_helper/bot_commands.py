@@ -55,6 +55,8 @@ class BotCommands:
         "Select": ["select", "sel"],
         "NzbSearch": ["nzbsearch", "ns"],
         "GenPyroSess": "exportsession",
+        "CategorySelect": ["category", "ctsel"],
+        "GDClean": ["gdclean", "gdc"],
         "Plugins": "plugins",
     }
 
@@ -67,13 +69,15 @@ class BotCommands:
             for plugin_info in plugin_manager.list_plugins():
                 if plugin_info.enabled and plugin_info.commands:
                     for cmd in plugin_info.commands:
-                        if cmd == "speedtest":
-                            commands["SpeedTest"] = ["speedtest", "stest"]
-                        elif cmd == "stest":
-                            if "SpeedTest" not in commands:
-                                commands["SpeedTest"] = ["speedtest", "stest"]
-                            elif "stest" not in commands["SpeedTest"]:
-                                commands["SpeedTest"].append("stest")
+                        key = cmd.capitalize()
+                        if key not in commands:
+                            commands[key] = [cmd]
+                        else:
+                            if isinstance(commands[key], list):
+                                if cmd not in commands[key]:
+                                    commands[key].append(cmd)
+                            else:
+                                commands[key] = [commands[key], cmd]
 
         return commands
 

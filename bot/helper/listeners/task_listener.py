@@ -7,7 +7,7 @@ from os import path as ospath
 from pyrogram.enums import ButtonStyle
 
 from aiofiles.os import listdir, remove, path as aiopath
-from requests import utils as rutils
+from niquests import utils as rutils
 
 from ... import (
     intervals,
@@ -58,6 +58,7 @@ from ..mirror_leech_utils.upload_utils.telegram_uploader import TelegramUploader
 from ..mirror_leech_utils.youtube_utils.youtube_upload import YouTubeUpload
 from ..telegram_helper.button_build import ButtonMaker
 from ..telegram_helper.message_utils import (
+    delete_links,
     delete_message,
     delete_status,
     send_message,
@@ -120,15 +121,25 @@ class TaskListener(TaskConfig):
             and Config.DATABASE_URL
         ):
             await database.add_incomplete_task(
-                self.message.chat.id, self.message.link, self.tag,
-                self.message.text or "", self.user_id,
-                self.message.reply_to_message.id if self.message.reply_to_message else 0,
+                self.message.chat.id,
+                self.message.link,
+                self.tag,
+                self.message.text or "",
+                self.user_id,
+                self.message.reply_to_message.id
+                if self.message.reply_to_message
+                else 0,
+                self.dump_msg_id,
             )
 
     async def on_download_complete(self):
         await sleep(2)
         if self.is_cancelled:
             return
+        if self.dump_msg_id and Config.DATABASE_URL:
+            await database.update_task_dump_msg(
+                self.message.link, self.dump_chat, self.dump_msg_id
+            )
         multi_links = False
         if (
             self.folder_name
@@ -351,7 +362,13 @@ class TaskListener(TaskConfig):
             LOGGER.info(f"Leech Name: {self.name}")
             tg = TelegramUploader(self, up_dir)
             async with task_dict_lock:
-                task_dict[self.mid] = TelegramStatus(self, tg, gid, "up")
+                task_dict[self.mid] = TelegramStatus(
+                    self,
+                    tg,
+                    gid,
+                    "up",
+                    "hul" if Config.USE_HYPER and TgClient.helper_bots else "",
+                )
             await gather(
                 update_status_message(self.message.chat.id),
                 tg.upload(),
@@ -361,7 +378,9 @@ class TaskListener(TaskConfig):
             LOGGER.info(f"Uphoster Upload Name: {self.name}")
             uphoster_service = self.user_dict.get("UPHOSTER_SERVICE", "gofile")
             services = uphoster_service.split(",")
-            ddl = MultiUphosterUpload(self, up_path, services)
+            ddl = MultiUphosterUpload(
+                self, up_path, services, self.folder_name.strip("/")
+            )
             async with task_dict_lock:
                 task_dict[self.mid] = UphosterStatus(self, ddl, gid, "up")
             await gather(
@@ -437,7 +456,7 @@ class TaskListener(TaskConfig):
 
             await send_message(self.user_id, msg, button)
             if Config.LEECH_DUMP_CHAT:
-                await send_message(int(Config.LEECH_DUMP_CHAT), msg, button)
+                await send_message(Config.LEECH_DUMP_CHAT, msg, button)
             await send_message(self.message, user_message, button)
 
         elif self.is_leech:
@@ -460,15 +479,17 @@ class TaskListener(TaskConfig):
                 msg += "〶 <b><u>Files List :</u></b>\n"
                 fmsg = ""
                 for index, (link, name) in enumerate(files.items(), start=1):
-                    chat_id, msg_id = link.split("/")[-2:]
                     fmsg += f"{index}. <a href='{link}'>{name}</a>"
                     if Config.MEDIA_STORE and (
                         self.is_super_chat or Config.LEECH_DUMP_CHAT
                     ):
-                        if chat_id.isdigit():
-                            chat_id = f"-100{chat_id}"
-                        flink = f"https://t.me/{TgClient.BNAME}?start={encode_slink('file' + chat_id + '&&' + msg_id)}"
-                        fmsg += f"\n┖ <b>Get Media</b> → <a href='{flink}'>Store Link</a> | <a href='https://t.me/share/url?url={flink}'>Share Link</a>"
+                        parts = link.split("/")[-2:]
+                        if len(parts) == 2:
+                            chat_id, msg_id = parts
+                            if chat_id.isdigit():
+                                chat_id = f"-100{chat_id}"
+                            flink = f"https://t.me/{TgClient.BNAME}?start={encode_slink('file' + chat_id + '&&' + msg_id)}"
+                            fmsg += f"\n┖ <b>Get Media</b> → <a href='{flink}'>Store Link</a> | <a href='https://t.me/share/url?url={flink}'>Share Link</a>"
                     fmsg += "\n"
                     if len(fmsg.encode() + msg.encode()) > 4000:
                         await send_message(log_chat, msg + fmsg)
@@ -485,7 +506,6 @@ class TaskListener(TaskConfig):
             multi_link_msg = ""
             multi_links = []
             if isinstance(link, dict) and not self.is_yt:
-                # MultiUphoster result
                 for service, result in link.items():
                     if "error" in result:
                         multi_link_msg += (
@@ -496,7 +516,7 @@ class TaskListener(TaskConfig):
                             (f"{service.capitalize()} Link", result["link"])
                         )
                 multi_link_msg = multi_link_msg.strip()
-                link = None  # Disable single link button logic
+                link = None
 
             if (
                 link
@@ -527,11 +547,9 @@ class TaskListener(TaskConfig):
                         "🔗 Rclone Link", share_url, style=ButtonStyle.PRIMARY
                     )
                 if not rclone_path and dir_id:
-                    INDEX_URL = ""
-                    if self.private_link:
-                        INDEX_URL = self.user_dict.get("INDEX_URL", "") or ""
-                    elif Config.INDEX_URL:
-                        INDEX_URL = Config.INDEX_URL
+                    INDEX_URL = self.user_dict.get("INDEX_URL", "") or ""
+                    if not INDEX_URL:
+                        INDEX_URL = Config.INDEX_URL or ""
                     if INDEX_URL and self.name:
                         safe_name = rutils.quote(self.name.strip("/"))
                         share_url = f"{INDEX_URL}/{safe_name}"
@@ -575,8 +593,10 @@ class TaskListener(TaskConfig):
             await start_from_queued()
             return
 
-        if self.pm_msg and (not Config.DELETE_LINKS or Config.CLEAN_LOG_MSG):
+        if self.pm_msg and not Config.DELETE_LINKS:
             await delete_message(self.pm_msg)
+
+        await delete_links(self.message)
 
         await clean_download(self.dir)
         async with task_dict_lock:
@@ -619,6 +639,7 @@ class TaskListener(TaskConfig):
         )
 
         await send_message(self.message, msg, button)
+        await delete_links(self.message)
         if count == 0:
             await self.clean()
         else:
@@ -657,6 +678,7 @@ class TaskListener(TaskConfig):
                 del task_dict[self.mid]
             count = len(task_dict)
         await send_message(self.message, f"{self.tag} {escape(str(error))}")
+        await delete_links(self.message)
         if count == 0:
             await self.clean()
         else:

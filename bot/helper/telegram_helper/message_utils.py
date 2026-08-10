@@ -3,12 +3,14 @@ from random import choice
 from re import match as re_match
 from time import time
 
-from pyrogram.types import Message, InputMediaPhoto
-from pyrogram.enums import ParseMode
+from pyrogram.types import Message, InputMediaPhoto, ReplyParameters
+from pyrogram.enums import ButtonStyle, ParseMode
 from pyrogram.errors import (
     FloodWait,
     MessageNotModified,
     MessageEmpty,
+    MessageTooLong,
+    MessageDeleteForbidden,
     ReplyMarkupInvalid,
     PhotoInvalidDimensions,
     WebpageCurlFailed,
@@ -24,12 +26,21 @@ try:
 except ImportError:
     FloodPremiumWait = FloodWait
 
-from ... import LOGGER, intervals, status_dict, task_dict_lock
+from ... import (
+    LOGGER,
+    bot_cache,
+    categories_dict,
+    intervals,
+    status_dict,
+    task_dict_lock,
+    user_data,
+)
 from ...core.config_manager import Config
 from ...core.tg_client import TgClient
-from ..ext_utils.bot_utils import SetInterval, download_image_url
+from ..ext_utils.bot_utils import SetInterval, download_image_url, fetch_drive_cat
 from ..ext_utils.exceptions import TgLinkException
 from ..ext_utils.status_utils import get_readable_message
+from .button_build import ButtonMaker
 
 
 async def send_message(message, text, buttons=None, block=True, photo=None, **kwargs):
@@ -42,36 +53,35 @@ async def send_message(message, text, buttons=None, block=True, photo=None, **kw
                     else:
                         photo = None
                 if photo is None:
-                    if isinstance(message, (int, str)):
-                        return await TgClient.bot.send_message(
-                            chat_id=message,
+                    if isinstance(message, Message):
+                        return await message.reply(
                             text=text,
+                            reply_parameters=ReplyParameters(message_id=message.id),
                             disable_web_page_preview=True,
                             disable_notification=True,
                             reply_markup=buttons,
+                            **kwargs,
                         )
-                    return await message.reply(
+                    return await TgClient.bot.send_message(
+                        chat_id=message,
                         text=text,
-                        quote=True,
                         disable_web_page_preview=True,
                         disable_notification=True,
                         reply_markup=buttons,
-                        **kwargs,
                     )
-                if isinstance(message, (int, str)):
-                    return await TgClient.bot.send_photo(
-                        chat_id=message,
+                if isinstance(message, Message):
+                    return await message.reply_photo(
                         photo=photo,
                         caption=text,
+                        reply_parameters=ReplyParameters(message_id=message.id),
                         reply_markup=buttons,
                         disable_notification=True,
                         **kwargs,
                     )
-                return await message.reply_photo(
+                return await TgClient.bot.send_photo(
+                    chat_id=message,
                     photo=photo,
-                    reply_to_message_id=message.id,
                     caption=text,
-                    quote=True,
                     reply_markup=buttons,
                     disable_notification=True,
                     **kwargs,
@@ -110,21 +120,21 @@ async def send_message(message, text, buttons=None, block=True, photo=None, **kw
             except Exception:
                 LOGGER.error("Error while sending photo", exc_info=True)
                 return
-        if isinstance(message, (int, str)):
-            return await TgClient.bot.send_message(
-                chat_id=message,
+        if isinstance(message, Message):
+            return await message.reply(
                 text=text,
+                reply_parameters=ReplyParameters(message_id=message.id),
                 disable_web_page_preview=True,
                 disable_notification=True,
                 reply_markup=buttons,
+                **kwargs,
             )
-        return await message.reply(
+        return await TgClient.bot.send_message(
+            chat_id=int(message),
             text=text,
-            quote=True,
             disable_web_page_preview=True,
             disable_notification=True,
             reply_markup=buttons,
-            **kwargs,
         )
     except FloodWait as f:
         LOGGER.warning(str(f))
@@ -135,13 +145,16 @@ async def send_message(message, text, buttons=None, block=True, photo=None, **kw
     except ReplyMarkupInvalid as rmi:
         LOGGER.warning(str(rmi))
         return await send_message(message, text, None)
+    except MessageTooLong:
+        return await send_message(message, text[:4096], buttons, block, photo)
     except (MessageEmpty, EntityBoundsInvalid):
         return await send_message(message, text, parse_mode=ParseMode.DISABLED)
     except PeerIdInvalid:
-        if isinstance(message, int):
-            await TgClient.bot.resolve_peer(message)
-            return await send_message(message, text, buttons, block, photo)
-        raise
+        LOGGER.warning(f"PeerIdInvalid {type(message)}")  # My Debug Style
+        if isinstance(message, (int, str)):
+            return await send_message(int(message), text, buttons, block, photo)
+    except ConnectionError:
+        return
     except Exception as e:
         LOGGER.error(str(e), exc_info=True)
         return str(e)
@@ -196,6 +209,8 @@ async def edit_message(message, text, buttons=None, block=True, photo=None):
             return str(f)
         await sleep(f.value * 1.2)
         return await edit_message(message, text, buttons, block, photo)
+    except OSError:
+        return
     except Exception as e:
         LOGGER.error(str(e), exc_info=True)
         return str(e)
@@ -210,6 +225,8 @@ async def edit_reply_markup(message, buttons):
         LOGGER.warning(str(f))
         await sleep(f.value * 1.2)
         return await edit_reply_markup(message, buttons)
+    except OSError:
+        return
     except Exception as e:
         LOGGER.error(str(e), exc_info=True)
         return str(e)
@@ -219,7 +236,7 @@ async def send_file(message, file, caption="", buttons=None):
     try:
         return await message.reply_document(
             document=file,
-            quote=True,
+            reply_parameters=ReplyParameters(message_id=message.id),
             caption=caption,
             disable_notification=True,
             reply_markup=buttons,
@@ -228,6 +245,8 @@ async def send_file(message, file, caption="", buttons=None):
         LOGGER.warning(str(f))
         await sleep(f.value * 1.2)
         return await send_file(message, file, caption)
+    except ConnectionError:
+        return
     except Exception as e:
         LOGGER.error(str(e), exc_info=True)
         return str(e)
@@ -246,6 +265,8 @@ async def send_rss(text, chat_id, thread_id):
         LOGGER.warning(str(f))
         await sleep(f.value * 1.2)
         return await send_rss(text, chat_id, thread_id)
+    except ConnectionError:
+        return
     except Exception as e:
         LOGGER.error(str(e), exc_info=True)
         return str(e)
@@ -257,7 +278,9 @@ async def delete_message(*args):
         return
     results = await gather(*tasks, return_exceptions=True)
     for result in results:
-        if isinstance(result, Exception):
+        if isinstance(result, MessageDeleteForbidden):
+            pass
+        elif isinstance(result, Exception):
             LOGGER.error(result)
 
 
@@ -421,7 +444,9 @@ async def send_status_message(msg, user_id=0):
                     del intervals["status"][sid]
                 return
             old_message = status_dict[sid]["message"]
-            message = await send_message(msg, text, buttons, block=False, photo="IMAGES")
+            message = await send_message(
+                msg, text, buttons, block=False, photo="IMAGES"
+            )
             if isinstance(message, str):
                 LOGGER.error(
                     f"Status with id: {sid} haven't been sent. Error: {message}"
@@ -434,7 +459,9 @@ async def send_status_message(msg, user_id=0):
             text, buttons = await get_readable_message(sid, is_user)
             if text is None:
                 return
-            message = await send_message(msg, text, buttons, block=False, photo="IMAGES")
+            message = await send_message(
+                msg, text, buttons, block=False, photo="IMAGES"
+            )
             if isinstance(message, str):
                 LOGGER.error(
                     f"Status with id: {sid} haven't been sent. Error: {message}"
@@ -453,3 +480,104 @@ async def send_status_message(msg, user_id=0):
             intervals["status"][sid] = SetInterval(
                 Config.STATUS_UPDATE_INTERVAL, update_status_message, sid
             )
+
+
+async def open_category_btns(message):
+    user_id = message.from_user.id
+    msg_id = message.id
+    buttons = ButtonMaker()
+    cat_name = None
+    dcats = fetch_drive_cat(user_id)
+    default_id = user_data.get(user_id, {}).get("GDRIVE_ID") or Config.GDRIVE_ID
+    default_index = user_data.get(user_id, {}).get("INDEX_URL") or Config.INDEX_URL
+    merged = {
+        "Default": {"drive_id": default_id, "index_link": default_index},
+        **dcats,
+        **categories_dict,
+    }
+    for i, name in enumerate(merged):
+        if i == 0:
+            cat_name = name
+        buttons.data_button(
+            f"{'✓️' if i == 0 else ''} {name}",
+            f"scat {user_id} {msg_id} {name.replace(' ', '_')}",
+        )
+    buttons.data_button(
+        "Cancel", f"scat {user_id} {msg_id} scancel", "footer", style=ButtonStyle.DANGER
+    )
+    buttons.data_button(
+        "Done (60)",
+        f"scat {user_id} {msg_id} sdone",
+        "footer",
+        style=ButtonStyle.SUCCESS,
+    )
+    prompt = await send_message(
+        message,
+        f"<b>Select the category where you want to upload</b>\n\n"
+        f"<i><b>Upload Category:</b></i> <code>{cat_name or 'None'}</code>\n\n"
+        f"<b>Timeout:</b> 60 sec",
+        buttons.build_menu(3),
+    )
+    start_time = time()
+    bot_cache[msg_id] = [None, None, False, False, start_time]
+    while time() - start_time <= 60:
+        await sleep(0.5)
+        if bot_cache[msg_id][2] or bot_cache[msg_id][3]:
+            break
+    drive_id, index_link, _, is_cancelled, __ = bot_cache[msg_id]
+    if not is_cancelled:
+        await delete_message(prompt)
+    else:
+        await edit_message(prompt, "<b>Task Cancelled</b>")
+    del bot_cache[msg_id]
+    return drive_id, index_link, is_cancelled
+
+
+async def open_drive_clean(message):
+    user_id = message.from_user.id
+    msg_id = message.id
+    buttons = ButtonMaker()
+    dcats = fetch_drive_cat(user_id)
+    default_id = user_data.get(user_id, {}).get("GDRIVE_ID") or Config.GDRIVE_ID
+    default_index = user_data.get(user_id, {}).get("INDEX_URL") or Config.INDEX_URL
+    merged = {
+        "Default": {"drive_id": default_id, "index_link": default_index},
+        **dcats,
+        **categories_dict,
+    }
+    first_cat = None
+    for i, name in enumerate(merged):
+        if i == 0:
+            first_cat = name
+        buttons.data_button(
+            f"{'✓️' if i == 0 else ''} {name}",
+            f"gdccat {user_id} {msg_id} {name.replace(' ', '_')}",
+        )
+    buttons.data_button(
+        "Cancel",
+        f"gdccat {user_id} {msg_id} ccancel",
+        position="footer",
+        style=ButtonStyle.DANGER,
+    )
+    prompt = await send_message(
+        message,
+        f"<b>Select Drive Category to Clean</b>\n\n"
+        f"<b>Category:</b> <code>{first_cat or 'None'}</code>\n\n"
+        f"<b>Timeout:</b> 60 sec",
+        buttons.build_menu(3),
+    )
+    start_time = time()
+    bot_cache[msg_id] = [None, False, False, start_time, None]
+    while time() - start_time <= 60:
+        await sleep(0.5)
+        if bot_cache[msg_id][1] or bot_cache[msg_id][2]:
+            break
+    drive_id = bot_cache[msg_id][0]
+    is_cancelled = bot_cache[msg_id][1]
+    cat_name = bot_cache[msg_id][4]
+    if not is_cancelled:
+        await delete_message(prompt)
+    else:
+        await edit_message(prompt, "<b>Task Cancelled</b>")
+    del bot_cache[msg_id]
+    return drive_id, is_cancelled, cat_name

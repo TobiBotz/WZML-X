@@ -1,5 +1,6 @@
-from asyncio import create_subprocess_exec, gather
+from asyncio import gather, get_event_loop, sleep
 from datetime import datetime
+from importlib import reload as reload_module
 from os import execl as osexecl
 from sys import executable
 
@@ -15,9 +16,13 @@ from ..core.config_manager import Config, BinConfig
 from ..core.jdownloader_booter import jdownloader
 from ..core.tg_client import TgClient
 from ..core.torrent_manager import TorrentManager
-from ..helper.ext_utils.bot_utils import new_task, resolve_command
+from ..helper.ext_utils.bot_utils import (
+    THREAD_POOL,
+    cmd_exec,
+    new_task,
+    resolve_command,
+)
 from ..helper.ext_utils.db_handler import database
-from ..helper.ext_utils.files_utils import clean_all
 from ..helper.listeners.mega_listener import mega_cleanup
 from ..helper.telegram_helper import button_build
 from ..helper.telegram_helper.message_utils import (
@@ -28,13 +33,16 @@ from ..helper.telegram_helper.message_utils import (
 
 @new_task
 async def restart_bot(_, message):
+    args = message.text.split()
+    mode = "soft" if "-s" in args else "hard"
     buttons = button_build.ButtonMaker()
-    buttons.data_button("Yes!", "botrestart confirm", style=ButtonStyle.SUCCESS)
+    buttons.data_button("Yes!", f"botrestart confirm {mode}", style=ButtonStyle.SUCCESS)
     buttons.data_button("No!", "botrestart cancel", style=ButtonStyle.DANGER)
     button = buttons.build_menu(2)
-    await send_message(
-        message, "<i>Are you really sure you want to restart the bot ?</i>", button
-    )
+    msg = "<i>Are you really sure you want to restart the bot ?</i>"
+    if mode == "soft":
+        msg += "\n<i>Mode: Soft (code reload only, tasks keep running)</i>"
+    await send_message(message, msg, button)
 
 
 @new_task
@@ -76,8 +84,11 @@ async def _send_msg(cid, msg):
 
 async def restart_notification():
     if await aiopath.isfile(".restartmsg"):
-        with open(".restartmsg") as f:
-            chat_id, msg_id = map(int, f)
+        try:
+            with open(".restartmsg") as f:
+                chat_id, msg_id = map(int, f)
+        except Exception:
+            chat_id, msg_id = 0, 0
     else:
         chat_id, msg_id = 0, 0
 
@@ -85,10 +96,13 @@ async def restart_notification():
 
     if Config.DATABASE_URL and (Config.INC_TASK_NOTIFY or Config.INC_TASK_RESUME):
         if notifier_dict := await database.get_incomplete_tasks():
-            if Config.INC_TASK_RESUME:
-                await _resume_tasks(notifier_dict)
-            if Config.INC_TASK_NOTIFY:
-                await _notify_tasks(notifier_dict, chat_id, now)
+            try:
+                if Config.INC_TASK_RESUME:
+                    await _resume_tasks(notifier_dict)
+                if Config.INC_TASK_NOTIFY:
+                    await _notify_tasks(notifier_dict, chat_id, now)
+            finally:
+                await database.drop_incomplete_tasks()
 
     if await aiopath.isfile(".restartmsg"):
         try:
@@ -128,6 +142,8 @@ async def _resume_tasks(notifier_dict):
                 command = task.get("command", "")
                 user_id = task.get("user_id", 0)
                 reply_to_msg_id = task.get("reply_to_msg_id", 0)
+                dump_msg_id = task.get("dump_msg_id", 0)
+                dump_chat = task.get("dump_chat", 0)
                 if not command or not user_id:
                     continue
                 try:
@@ -157,8 +173,19 @@ async def _resume_tasks(notifier_dict):
                             LOGGER.warning(
                                 f"Resume: cannot fetch reply msg {reply_to_msg_id}: {e}"
                             )
+                    if not msg.reply_to_message and dump_msg_id and dump_chat:
+                        try:
+                            dump_msg = await TgClient.bot.get_messages(
+                                chat_id=dump_chat, message_ids=dump_msg_id
+                            )
+                            if dump_msg:
+                                msg.reply_to_message = dump_msg
+                        except Exception as e:
+                            LOGGER.warning(
+                                f"Resume: cannot fetch dump msg {dump_msg_id}: {e}"
+                            )
                     await handler(TgClient.bot, msg)
-                    await delete_message(msg)
+                    await sleep(1)
                 except Exception as e:
                     LOGGER.error(f"Resume: failed for '{command}' in {cid}: {e}")
 
@@ -172,52 +199,196 @@ async def confirm_restart(_, query):
     await delete_message(message)
     if data[1] == "confirm":
         intervals["stopAll"] = True
-        restart_message = await send_message(reply_to, "<i>Restarting...</i>")
-        await delete_message(message)
-        await TgClient.stop()
-        if scheduler.running:
-            scheduler.shutdown(wait=False)
-        if qb := intervals["qb"]:
-            qb.cancel()
-        if jd := intervals["jd"]:
-            jd.cancel()
-        if nzb := intervals["nzb"]:
-            nzb.cancel()
-        if st := intervals["status"]:
-            for intvl in list(st.values()):
-                intvl.cancel()
-        await mega_cleanup()
-        await clean_all()
-        await TorrentManager.close_all()
-        if sabnzbd_client.LOGGED_IN:
-            await gather(
-                sabnzbd_client.pause_all(),
-                sabnzbd_client.delete_job("all", True),
-                sabnzbd_client.purge_all(True),
-                sabnzbd_client.delete_history("all", delete_files=True),
+        if data[2] == "soft":
+            restart_msg = await send_message(reply_to, "<i>Reloading...</i>")
+            await _runtime_reload()
+            intervals["stopAll"] = False
+            try:
+                await TgClient.bot.edit_message_text(
+                    chat_id=restart_msg.chat.id,
+                    message_id=restart_msg.id,
+                    text=_restart_header(datetime.now(timezone(Config.TIMEZONE))),
+                    disable_web_page_preview=True,
+                )
+            except Exception as e:
+                LOGGER.error(e)
+        else:
+            restart_message = await send_message(reply_to, "<i>Restarting...</i>")
+
+            if qb := intervals["qb"]:
+                qb.cancel()
+            if jd := intervals["jd"]:
+                jd.cancel()
+            if nzb := intervals["nzb"]:
+                nzb.cancel()
+            if st := intervals["status"]:
+                for intvl in list(st.values()):
+                    intvl.cancel()
+
+            if scheduler.running:
+                scheduler.shutdown(wait=False)
+
+            await mega_cleanup()
+
+            sabnzbd_task = None
+            jd_task = None
+            if not Config.DISABLE_NZB and sabnzbd_client.LOGGED_IN:
+                sabnzbd_task = gather(
+                    sabnzbd_client.pause_all(),
+                    sabnzbd_client.delete_job("all", True),
+                    sabnzbd_client.purge_all(True),
+                    sabnzbd_client.delete_history("all", delete_files=True),
+                )
+            if not Config.DISABLE_JD and jdownloader.is_connected:
+                jd_task = gather(
+                    jdownloader.device.downloadcontroller.stop_downloads(),
+                    jdownloader.device.linkgrabber.clear_list(),
+                    jdownloader.device.downloads.cleanup(
+                        "DELETE_ALL",
+                        "REMOVE_LINKS_AND_DELETE_FILES",
+                        "ALL",
+                    ),
+                )
+
+            try:
+                await TorrentManager.remove_all()
+            except Exception:
+                pass
+            await TorrentManager.close_all()
+
+            if sabnzbd_task is not None:
+                try:
+                    await sabnzbd_task
+                except Exception:
+                    pass
+                try:
+                    await sabnzbd_client.close()
+                except Exception:
+                    pass
+            if jd_task is not None:
+                try:
+                    await jd_task
+                except Exception:
+                    pass
+                try:
+                    await jdownloader.close()
+                except Exception:
+                    pass
+
+            await TgClient.stop()
+
+            THREAD_POOL.shutdown(wait=False)
+
+            await cmd_exec(
+                [
+                    "pkill",
+                    "-9",
+                    "-f",
+                    f"gunicorn|{BinConfig.ARIA2_NAME}|{BinConfig.QBIT_NAME}|{BinConfig.FFMPEG_NAME}|{BinConfig.RCLONE_NAME}|java|{BinConfig.SABNZBD_NAME}|7z|split",
+                ]
             )
-            await sabnzbd_client.close()
-        if jdownloader.is_connected:
-            await gather(
-                jdownloader.device.downloadcontroller.stop_downloads(),
-                jdownloader.device.linkgrabber.clear_list(),
-                jdownloader.device.downloads.cleanup(
-                    "DELETE_ALL",
-                    "REMOVE_LINKS_AND_DELETE_FILES",
-                    "ALL",
-                ),
-            )
-            await jdownloader.close()
-        proc1 = await create_subprocess_exec(
-            "pkill",
-            "-9",
-            "-f",
-            f"gunicorn|{BinConfig.ARIA2_NAME}|{BinConfig.QBIT_NAME}|{BinConfig.FFMPEG_NAME}|{BinConfig.RCLONE_NAME}|java|{BinConfig.SABNZBD_NAME}|7z|split",
-        )
-        proc2 = await create_subprocess_exec("python3", "update.py")
-        await gather(proc1.wait(), proc2.wait())
-        async with aiopen(".restartmsg", "w") as f:
-            await f.write(f"{restart_message.chat.id}\n{restart_message.id}\n")
-        osexecl(executable, executable, "-m", "bot")
+
+            await cmd_exec(["python3", "update.py"])
+
+            try:
+                async with aiopen(".restartmsg", "w") as f:
+                    await f.write(f"{restart_message.chat.id}\n{restart_message.id}\n")
+            except Exception:
+                pass
+
+            get_event_loop().create_task(_background_cleanup())
+
+            osexecl(executable, executable, "-m", "bot")
     else:
         await delete_message(message, reply_to)
+
+
+async def _runtime_reload():
+    await cmd_exec(["python3", "update.py"])
+
+    import sys as _sys
+
+    modules_to_reload = [
+        "bot.helper.ext_utils.bot_utils",
+        "bot.helper.ext_utils.help_messages",
+        "bot.helper.telegram_helper.message_utils",
+        "bot.helper.telegram_helper.button_build",
+        "bot.helper.telegram_helper.filters",
+        "bot.helper.telegram_helper.bot_commands",
+        "bot.modules.bot_settings",
+        "bot.modules.cancel_task",
+        "bot.modules.chat_permission",
+        "bot.modules.clone",
+        "bot.modules.exec",
+        "bot.modules.file_selector",
+        "bot.modules.force_start",
+        "bot.modules.gd_count",
+        "bot.modules.gd_delete",
+        "bot.modules.gd_clean",
+        "bot.modules.gd_search",
+        "bot.modules.help",
+        "bot.modules.images",
+        "bot.modules.mediainfo",
+        "bot.modules.category_select",
+        "bot.modules.broadcast",
+        "bot.modules.mirror_leech",
+        "bot.modules.restart",
+        "bot.modules.imdb",
+        "bot.modules.rss",
+        "bot.modules.search",
+        "bot.modules.nzb_search",
+        "bot.modules.services",
+        "bot.modules.shell",
+        "bot.modules.stats",
+        "bot.modules.status",
+        "bot.modules.users_settings",
+        "bot.modules.gen_pyro_sess",
+        "bot.modules.ytdlp",
+    ]
+
+    for mod_name in modules_to_reload:
+        if mod_name in _sys.modules:
+            try:
+                reload_module(_sys.modules[mod_name])
+            except Exception as e:
+                LOGGER.error(f"Reload failed for {mod_name}: {e}")
+
+    try:
+        import bot.modules as _bm
+
+        reload_module(_bm)
+    except Exception as e:
+        LOGGER.error(f"Reload failed for bot.modules: {e}")
+
+    try:
+        import bot.core.handlers as _bh
+
+        reload_module(_bh)
+    except Exception as e:
+        LOGGER.error(f"Reload failed for bot.core.handlers: {e}")
+
+    try:
+        before = {g: len(hs) for g, hs in TgClient.bot.dispatcher.handlers.items()}
+    except Exception:
+        before = {}
+
+    try:
+        from bot.core.handlers import add_handlers
+
+        await add_handlers()
+    except Exception as e:
+        LOGGER.error(f"Handler re-registration failed: {e}")
+        return
+
+    for group, old_count in before.items():
+        if group in TgClient.bot.dispatcher.handlers:
+            TgClient.bot.dispatcher.handlers[group] = TgClient.bot.dispatcher.handlers[
+                group
+            ][old_count:]
+
+
+async def _background_cleanup():
+    try:
+        await cmd_exec(["rm", "-rf", "/usr/src/app/downloads/"])
+    except Exception:
+        pass

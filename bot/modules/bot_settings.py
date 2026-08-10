@@ -1,6 +1,4 @@
 from asyncio import (
-    create_subprocess_exec,
-    create_subprocess_shell,
     gather,
     sleep,
 )
@@ -8,7 +6,7 @@ from ast import literal_eval
 from pyrogram.enums import ButtonStyle
 from functools import partial
 from io import BytesIO
-from os import getcwd
+from os import getcwd, getenv
 from shlex import quote as shlex_quote
 from time import time
 
@@ -22,6 +20,8 @@ from pyrogram.handlers import MessageHandler
 from .. import (
     LOGGER,
     aria2_options,
+    bot_loop,
+    categories_dict,
     drives_ids,
     drives_names,
     index_urls,
@@ -30,18 +30,21 @@ from .. import (
     nzb_options,
     qbit_options,
     sabnzbd_client,
+    scheduler,
     task_dict,
     shortener_dict,
     excluded_extensions,
     auth_chats,
     sudo_users,
+    var_list,
 )
 from ..helper.ext_utils.bot_utils import (
     SetInterval,
+    cmd_exec,
     new_task,
 )
 from ..core.config_manager import Config
-from ..core.tg_client import TgClient
+from ..core.tg_client import TgClient, db_partition_id
 from ..core.torrent_manager import TorrentManager
 from ..core.startup import update_qb_options, update_nzb_options, update_variables
 from ..helper.ext_utils.db_handler import database
@@ -80,18 +83,22 @@ DEFAULT_VALUES = {
 BOOL_VARS = [
     "AS_DOCUMENT",
     "BOT_PM",
-    "CLEAN_LOG_MSG",
     "COLORED_BTNS",
     "DELETE_LINKS",
+    "DRIVE_CATEGORY_MODE",
     "DISABLE_BULK",
     "DISABLE_FF_MODE",
+    "DISABLE_JD",
     "DISABLE_LEECH",
     "DISABLE_MULTI",
+    "DISABLE_NZB",
+    "DISABLE_RSS",
+    "DISABLE_SEARCH",
     "DISABLE_SEED",
     "DISABLE_TORRENTS",
+    "DISABLE_YTDLP",
     "DISABLE_MEGA",
     "EQUAL_SPLITS",
-    "HYBRID_LEECH",
     "INC_TASK_NOTIFY",
     "INC_TASK_RESUME",
     "IS_TEAM_DRIVE",
@@ -100,8 +107,7 @@ BOOL_VARS = [
     "SET_COMMANDS",
     "SHOW_CLOUD_LINK",
     "STOP_DUPLICATE",
-    "UPDATE_PKGS",
-    "USER_TRANSMISSION",
+    "USE_IMAGES",
     "USE_SERVICE_ACCOUNTS",
     "WEB_PINCODE",
 ]
@@ -110,7 +116,6 @@ DEFAULT_DESP = {
     "AS_DOCUMENT": "Send files as document instead of media. Default: False.",
     "AUTHORIZED_CHATS": "User/Chat IDs authorized to use the bot. Space-separated. Supports thread IDs with | separator.",
     "BASE_URL": "Public URL for torrent web file selection. Format: http://ip or http://ip:port.",
-    "BASE_URL_PORT": "Port for BASE_URL. Default: 80.",
     "BOT_TOKEN": "Telegram Bot Token from @BotFather.",
     "HELPER_TOKENS": "Additional bot tokens for parallel task handling.",
     "BOT_MAX_TASKS": "Max tasks (including queued) the bot runs in parallel. 0 = unlimited.",
@@ -129,6 +134,11 @@ DEFAULT_DESP = {
     "DISABLE_SEED": "Disable seeding after torrent download. Default: False.",
     "DISABLE_FF_MODE": "Disable FFmpeg processing mode. Default: False.",
     "DISABLE_MEGA": "Disable Mega Processor for bot. Default: False.",
+    "DISABLE_JD": "Disable JDownloader downloads. Saves ~256-500MB RAM. Default: False.",
+    "DISABLE_NZB": "Disable SABnzbd/Usenet downloads. Saves ~100-200MB RAM. Default: False.",
+    "DISABLE_RSS": "Disable RSS feed monitoring. Saves CPU cycles. Default: False.",
+    "DISABLE_SEARCH": "Disable torrent search plugins. Saves network I/O. Default: False.",
+    "DISABLE_YTDLP": "Disable YouTube/YT-DLP downloads. Default: False.",
     "EQUAL_SPLITS": "Split files into equal parts of LEECH_SPLIT_SIZE. Default: False.",
     "EXCLUDED_EXTENSIONS": "File extensions to exclude from upload/clone. Space-separated.",
     "FFMPEG_CMDS": "Custom FFmpeg command presets. Dict format.",
@@ -149,11 +159,12 @@ DEFAULT_DESP = {
     "AUTHOR_NAME": "Author name shown on Telegraph pages.",
     "AUTHOR_URL": "Author URL for Telegraph pages. Use channel URL for join button.",
     "INSTADL_API": "Instagram downloader API key.",
-    "IMDB_TEMPLATE": "HTML template for IMDB results display.",
+    "IMDB_TEMPLATE": "Optional HTML template for IMDB results. If empty, uses Rich Messages.",
     "IMAGES": "List of image URLs or file_ids for the gallery. Managed via /addimage command.",
     "IMG_SEARCH": "Comma-separated keywords to auto-fetch wallpaper images on startup. e.g. anime, nature, space",
     "IMG_PAGE": "Number of pages to search for each keyword in IMG_SEARCH. Each page has ~70 images. Default: 1",
     "USE_IMAGES": "Enable random photo backgrounds on bot messages. Requires IMAGES list. Default: False",
+    "IMG_SOURCES": "List of image sources to fetch from. Options: wallpaperflare, peapix, wallhaven. Default: wallpaperflare",
     "INC_TASK_NOTIFY": "Notify about incomplete tasks after restart. Default: False.",
     "INC_TASK_RESUME": "Auto-resume incomplete tasks on restart. Default: False.",
     "INDEX_URL": "Google Drive Index URL for direct links.",
@@ -179,17 +190,18 @@ DEFAULT_DESP = {
     "LEECH_DUMP_CHAT": "Chat ID (integer) to dump all leeched files. Leave empty to disable.",
     "LINKS_LOG_ID": "Chat ID for link logging.",
     "MIRROR_LOG_ID": "Chat ID(s) for mirror logs. Space-separated for multiple.",
-    "CLEAN_LOG_MSG": "Clean leech log and bot PM task messages. Default: False.",
     "LEECH_PREFIX": "Prefix added to leeched file names.",
     "LEECH_CAPTION": "Custom caption for leeched files. Supports HTML.",
     "LEECH_SUFFIX": "Suffix added to leeched file names.",
     "LEECH_FONT": "Font style for captions: b, i, u, s, code, spoiler.",
     "LEECH_SPLIT_SIZE": "Split size for Telegram uploads in bytes. Default: 2GB (4GB for premium).",
     "MEDIA_GROUP": "Upload split parts as media group. Default: False.",
-    "HYBRID_LEECH": "Use both premium and normal upload methods for speed. Default: True.",
+    "USE_HYPER": "Enable HyperDL/HyperUP for faster Telegram transfers. Default: True.",
     "HYPER_THREADS": "Number of parallel download parts (clients). 0 = auto.",
-    "HYPER_PIPELINE": "Concurrent GetFile requests per HyperDL part. Default: 32.",
-    "HYPER_CHUNK": "HyperDL working chunk size in bytes. Default: 256 * 1024 (256KB).",
+    "HYPER_PIPELINE": "Concurrent GetFile requests per HyperDL part. Default: 4.",
+    "HYPER_CHUNK": "HyperDL working chunk size in bytes. Default: 512 * 1024 (512KB).",
+    "CPU_LIMIT": "CPU limit percentage for background services (SABnzbd, JDownloader). Default: 20.",
+    "THROTTLE_SERVICES": "Pause services during heavy ops (FFmpeg). auto=low-end only, always, never.",
     "HYDRA_IP": "Hydra API IP address for search.",
     "HYDRA_API_KEY": "Hydra API key for search.",
     "NAME_SWAP": "Rename files using pattern. Format: old:new|old2:new2.",
@@ -203,7 +215,7 @@ DEFAULT_DESP = {
     "SHOW_CLOUD_LINK": "Show cloud link button on leeched files. Default: True.",
     "RCLONE_SERVE_USER": "Username for rclone serve authentication.",
     "RCLONE_SERVE_PASS": "Password for rclone serve authentication.",
-    "RCLONE_SERVE_PORT": "Port for rclone serve. Default: 8080.",
+    "RCLONE_SERVE_PORT": "Port for rclone serve. Default: 8081.",
     "RSS_CHAT": "Chat ID for RSS feed notifications.",
     "RSS_DELAY": "RSS feed check interval in seconds. Default: 600.",
     "RSS_SIZE_LIMIT": "RSS download size limit in GB. 0 = unlimited.",
@@ -229,13 +241,12 @@ DEFAULT_DESP = {
     "UPLOAD_PATHS": "Custom upload paths per extension. Dict format.",
     "UPSTREAM_REPO": "GitHub repo URL for bot updates.",
     "UPSTREAM_BRANCH": "Branch for updates. Default: wzv3.",
-    "UPDATE_PKGS": "Update pip packages on restart. Default: True.",
     "USENET_SERVERS": "Usenet server configurations. List of dicts.",
     "USER_SESSION_STRING": "Pyrogram session string for user account tasks.",
-    "USER_TRANSMISSION": "Use user account for transmission tasks. Default: True.",
+    "TRANSMISSION_MODE": "Transmission mode: bot, user, or both. Default: both.",
     "USE_SERVICE_ACCOUNTS": "Use Google Service Accounts. Default: False.",
+    "WEB_ACCESS_PASSWORD": "Secret for deriving proxy passwords. Set once, use derived passwords in browser. Empty = auto-generated.",
     "WEB_PINCODE": "Ask for pincode in web file selection. Default: True.",
-    "WZMLX_WEB_SECRET": "Secret key for web interface authentication.",
     "YT_DLP_OPTIONS": "Default yt-dlp options. Format: key:value|key:value.",
     "YT_DESP": "Description for YouTube uploads. Default: Uploaded with WZML-X bot.",
     "YT_TAGS": "Tags for YouTube uploads. List format.",
@@ -244,14 +255,22 @@ DEFAULT_DESP = {
 }
 
 PROTECTED_VARS = {
-    "TELEGRAM_HASH", "TELEGRAM_API", "OWNER_ID", "BOT_TOKEN",
-    "AUTHORIZED_CHATS", "DATABASE_URL", "DOWNLOAD_DIR",
-    "SUDO_USERS", "CMD_SUFFIX", "USER_SESSION_STRING", "TG_PROXY",
+    "TELEGRAM_HASH",
+    "TELEGRAM_API",
+    "OWNER_ID",
+    "BOT_TOKEN",
+    "DATABASE_URL",
 }
 RESTART_VARS = {
-    "CMD_SUFFIX", "OWNER_ID", "USER_SESSION_STRING",
-    "TELEGRAM_HASH", "TELEGRAM_API", "BOT_TOKEN",
-    "TG_PROXY", "AUTHORIZED_CHATS", "DATABASE_URL", "DOWNLOAD_DIR",
+    "CMD_SUFFIX",
+    "OWNER_ID",
+    "USER_SESSION_STRING",
+    "TELEGRAM_HASH",
+    "TELEGRAM_API",
+    "BOT_TOKEN",
+    "TG_PROXY",
+    "AUTHORIZED_CHATS",
+    "DATABASE_URL",
 }
 
 ONOFF_VARS = [
@@ -262,6 +281,11 @@ ONOFF_VARS = [
     "DISABLE_SEED",
     "DISABLE_FF_MODE",
     "DISABLE_MEGA",
+    "DISABLE_JD",
+    "DISABLE_NZB",
+    "DISABLE_RSS",
+    "DISABLE_SEARCH",
+    "DISABLE_YTDLP",
 ]
 
 
@@ -269,7 +293,7 @@ async def get_buttons(key=None, edit_type=None, edit_mode=False):
     buttons = ButtonMaker()
     if key is None:
         buttons.data_button("Config Variables", "botset var")
-        buttons.data_button("On/Off Settings", "botset setonoff")
+        buttons.data_button("Module Settings", "botset setonoff")
         buttons.data_button("Private Files", "botset private open")
         buttons.data_button("Qbit Settings", "botset qbit")
         buttons.data_button("Aria2c Settings", "botset aria")
@@ -301,7 +325,9 @@ async def get_buttons(key=None, edit_type=None, edit_mode=False):
             msg = f"<i>Send a valid value for <code>{key}</code>.</i> Current value is <code>{nzb_options[key]}</code>\nIf the value is list then separate them by space or ,\nExample: <code>.exe,info</code> or <code>.exe .info</code>\n┖ <b>Time Left :</b> <code>60 sec</code>"
         elif edit_type.startswith("nzbsevar"):
             index = 0 if key == "newser" else int(edit_type.replace("nzbsevar", ""))
-            buttons.data_button("Back", f"botset nzbser{index}", style=ButtonStyle.PRIMARY)
+            buttons.data_button(
+                "Back", f"botset nzbser{index}", style=ButtonStyle.PRIMARY
+            )
             if key != "newser":
                 buttons.data_button("Empty", f"botset emptyserkey {index} {key}")
             buttons.data_button("Close", "botset close", style=ButtonStyle.DANGER)
@@ -323,7 +349,9 @@ async def get_buttons(key=None, edit_type=None, edit_mode=False):
             if key not in BOOL_VARS:
                 if not edit_mode:
                     buttons.data_button(
-                        "Edit Value", f"botset editvar {key} edit", style=ButtonStyle.PRIMARY
+                        "Edit Value",
+                        f"botset editvar {key} edit",
+                        style=ButtonStyle.PRIMARY,
                     )
                 else:
                     buttons.data_button("Stop Edit", f"botset editvar {key}")
@@ -333,9 +361,13 @@ async def get_buttons(key=None, edit_type=None, edit_mode=False):
                 buttons.data_button("False", f"botset boolvar {key} off")
             if key not in BOOL_VARS and key not in PROTECTED_VARS:
                 buttons.data_button("Reset", f"botset resetvar {key}")
-            buttons.data_button("Close", "botset close", position="footer", style=ButtonStyle.DANGER)
+            buttons.data_button(
+                "Close", "botset close", position="footer", style=ButtonStyle.DANGER
+            )
             if edit_mode and key in RESTART_VARS:
-                msg += "\n<b>Note:</b> Restart required for this edit to take effect!\n\n"
+                msg += (
+                    "\n<b>Note:</b> Restart required for this edit to take effect!\n\n"
+                )
             if edit_mode and key not in BOOL_VARS:
                 msg += "<i>Send a valid value for the above Var.</i>\n┖ <b>Time Left :</b> <code>60 sec</code>"
     elif key == "var":
@@ -361,8 +393,10 @@ async def get_buttons(key=None, edit_type=None, edit_mode=False):
             else:
                 buttons.data_button(label, f"botset toggleonoff {k} off")
         buttons.data_button("Back", "botset back", position="footer")
-        buttons.data_button("Close", "botset close", position="footer", style=ButtonStyle.DANGER)
-        msg = "⌬ <b><u>On/Off Settings</u></b>"
+        buttons.data_button(
+            "Close", "botset close", position="footer", style=ButtonStyle.DANGER
+        )
+        msg = "⌬ <b><u>Module Settings</u></b>"
     elif key == "private":
         if edit_mode:
             buttons.data_button("Stop Invoke File", "botset private stop", "header")
@@ -383,6 +417,7 @@ async def get_buttons(key=None, edit_type=None, edit_mode=False):
                     "accounts.zip",
                     "list_drives.txt",
                     "shortener.txt",
+                    "categories.txt",
                     "cookies.txt",
                     ".netrc",
                 ]
@@ -446,24 +481,29 @@ async def get_buttons(key=None, edit_type=None, edit_mode=False):
             )
         msg = f"Sabnzbd Options | Page: {int(start / 10)} | State: {state}"
     elif key == "nzbserver":
-        if len(Config.USENET_SERVERS) > 0:
-            for index, k in enumerate(Config.USENET_SERVERS[start : 10 + start]):
+        servers = (
+            Config.USENET_SERVERS if isinstance(Config.USENET_SERVERS, list) else []
+        )
+        if len(servers) > 0:
+            for index, k in enumerate(servers[start : 10 + start]):
                 buttons.data_button(k["name"], f"botset nzbser{index}")
         buttons.data_button("Add New", "botset nzbsevar newser")
         buttons.data_button("Back", "botset nzb")
         buttons.data_button("Close", "botset close", style=ButtonStyle.DANGER)
-        if len(Config.USENET_SERVERS) > 10:
-            for x in range(0, len(Config.USENET_SERVERS), 10):
+        if len(servers) > 10:
+            for x in range(0, len(servers), 10):
                 buttons.data_button(
                     f"{int(x / 10)}", f"botset start nzbser {x}", position="footer"
                 )
         msg = f"Usenet Servers | Page: {int(start / 10)} | State: {state}"
     elif key.startswith("nzbser"):
+        servers = (
+            Config.USENET_SERVERS if isinstance(Config.USENET_SERVERS, list) else []
+        )
         index = int(key.replace("nzbser", ""))
-        LOGGER.info(f"Data: {key}, {index}")
-        if index >= len(Config.USENET_SERVERS):
+        if not servers or index >= len(servers):
             return await get_buttons("nzbserver")
-        for k in list(Config.USENET_SERVERS[index].keys())[start : 10 + start]:
+        for k in list(servers[index].keys())[start : 10 + start]:
             buttons.data_button(k, f"botset nzbsevar{index} {k}")
         if state == "view":
             buttons.data_button("Edit", f"botset edit {key}")
@@ -472,12 +512,14 @@ async def get_buttons(key=None, edit_type=None, edit_mode=False):
         buttons.data_button("Remove Server", f"botset remser {index}")
         buttons.data_button("Back", "botset nzbserver")
         buttons.data_button("Close", "botset close", style=ButtonStyle.DANGER)
-        if len(Config.USENET_SERVERS[index].keys()) > 10:
-            for x in range(0, len(Config.USENET_SERVERS[index]), 10):
+        if len(servers[index].keys()) > 10:
+            for x in range(0, len(servers[index]), 10):
                 buttons.data_button(
                     f"{int(x / 10)}", f"botset start {key} {x}", position="footer"
                 )
         msg = f"Server Keys | Page: {int(start / 10)} | State: {state}"
+    else:
+        msg = "Unknown option"
 
     return msg, buttons.build_menu(1 if key is None else 2)
 
@@ -510,13 +552,6 @@ async def edit_variable(_, message, pre_message, key):
         value = int(value)
     elif key == "LEECH_SPLIT_SIZE":
         value = min(int(value), TgClient.MAX_SPLIT_SIZE)
-    elif key == "BASE_URL_PORT":
-        value = int(value)
-        if Config.BASE_URL:
-            await (await create_subprocess_exec("pkill", "-9", "-f", "gunicorn")).wait()
-            await create_subprocess_shell(
-                f"gunicorn -k uvicorn.workers.UvicornWorker -w 1 web.wserver:app --bind 0.0.0.0:{value}"
-            )
     elif key == "EXCLUDED_EXTENSIONS":
         fx = value.split()
         excluded_extensions.clear()
@@ -587,9 +622,31 @@ async def edit_variable(_, message, pre_message, key):
     elif value.isdigit():
         value = int(value)
     elif value.startswith("[") and value.endswith("]"):
-        value = literal_eval(value)
+        try:
+            value = literal_eval(value)
+        except Exception:
+            await send_message(message, "Invalid list/dict format!")
+            return
     elif value.startswith("{") and value.endswith("}"):
-        value = literal_eval(value)
+        try:
+            value = literal_eval(value)
+        except Exception:
+            await send_message(message, "Invalid dict format!")
+            return
+    if key == "USENET_SERVERS":
+        if not isinstance(value, list):
+            await send_message(message, "USENET_SERVERS must be a list of dicts!")
+            return
+        for s in value:
+            if not isinstance(s, dict):
+                await send_message(message, "Each USENET_SERVERS entry must be a dict!")
+                return
+            missing = [f for f in REQUIRED_SERVER_FIELDS if not s.get(f)]
+            if missing:
+                await send_message(
+                    message, f"Server missing required field(s): {', '.join(missing)}"
+                )
+                return
     if not isinstance(value, (str, int, float, bool, list, dict, type(None))):
         value = str(value)
     Config.set(key, value)
@@ -625,7 +682,11 @@ async def toggle_bool_var(_, query, pre_message, key, value):
     Config.set(key, bool_value)
     await update_buttons(pre_message, key, "editvar", False)
     await database.update_config({key: bool_value})
-    if key in ("INC_TASK_NOTIFY", "INC_TASK_RESUME") and not bool_value and Config.DATABASE_URL:
+    if (
+        key in ("INC_TASK_NOTIFY", "INC_TASK_RESUME")
+        and not bool_value
+        and Config.DATABASE_URL
+    ):
         await database.trunc_table("tasks")
     elif key in ["QUEUE_ALL", "QUEUE_DOWNLOAD", "QUEUE_UPLOAD"]:
         await start_from_queued()
@@ -636,8 +697,63 @@ async def toggle_onoff_var(_, query, pre_message, key, value):
     handler_dict[query.message.chat.id] = False
     bool_value = value == "on"
     Config.set(key, bool_value)
-    await update_buttons(pre_message, "setonoff")
     await database.update_config({key: bool_value})
+    await _handle_service_toggle(key, bool_value)
+    await update_buttons(pre_message, "setonoff")
+
+
+async def _handle_service_toggle(key, disabled):
+    if key == "DISABLE_JD":
+        if disabled:
+            if jdownloader.is_connected:
+                try:
+                    await jdownloader.device.downloadcontroller.stop_downloads()
+                    await jdownloader.close()
+                except Exception:
+                    pass
+                try:
+                    await cmd_exec(["pkill", "-9", "-f", "java"])
+                except Exception:
+                    pass
+                LOGGER.info("JDownloader stopped via Module Settings")
+        else:
+            try:
+                from ..core.startup import load_configurations
+
+                await load_configurations()
+            except Exception:
+                pass
+            bot_loop.create_task(jdownloader.boot())
+            LOGGER.info("JDownloader starting via Module Settings")
+    elif key == "DISABLE_NZB":
+        if disabled:
+            if sabnzbd_client.LOGGED_IN:
+                try:
+                    await gather(
+                        sabnzbd_client.pause_all(),
+                        sabnzbd_client.close(),
+                    )
+                except Exception:
+                    pass
+                try:
+                    await cmd_exec(["pkill", "-9", "-f", "SABnzbd"])
+                except Exception:
+                    pass
+                LOGGER.info("SABnzbd stopped via Module Settings")
+        else:
+            LOGGER.info("SABnzbd requires restart to re-enable")
+    elif key == "DISABLE_RSS":
+        if disabled:
+            if scheduler.running:
+                scheduler.shutdown(wait=False)
+                LOGGER.info("RSS Scheduler stopped via Module Settings")
+        else:
+            if not scheduler.running:
+                try:
+                    scheduler.start()
+                    LOGGER.info("RSS Scheduler started via Module Settings")
+                except Exception:
+                    pass
 
 
 @new_task
@@ -712,39 +828,94 @@ async def edit_nzb(_, message, pre_message, key):
     await database.update_nzb_config()
 
 
+REQUIRED_SERVER_FIELDS = ["name", "host", "username", "password"]
+
+
 @new_task
 async def edit_nzb_server(_, message, pre_message, key, index=0):
     handler_dict[message.chat.id] = False
-    value = message.text
+    value = message.text.strip()
     if key == "newser":
-        if value.startswith("{") and value.endswith("}"):
-            try:
-                value = literal_eval(value)
-            except Exception:
-                await send_message(message, "Invalid dict format!")
-                await update_buttons(pre_message, "nzbserver")
-                return
-            res = await sabnzbd_client.add_server(value)
-            if not res["config"]["servers"][0]["host"]:
-                await send_message(message, "Invalid server!")
-                await update_buttons(pre_message, "nzbserver")
-                return
-            Config.USENET_SERVERS.append(value)
-            await update_buttons(pre_message, "nzbserver")
-        else:
+        if not (value.startswith("{") and value.endswith("}")):
             await send_message(message, "Invalid dict format!")
             await update_buttons(pre_message, "nzbserver")
             return
+        try:
+            value = literal_eval(value)
+        except Exception:
+            await send_message(message, "Invalid dict format!")
+            await update_buttons(pre_message, "nzbserver")
+            return
+        if not isinstance(value, dict):
+            await send_message(message, "Must be a dict!")
+            await update_buttons(pre_message, "nzbserver")
+            return
+        missing = [f for f in REQUIRED_SERVER_FIELDS if not value.get(f)]
+        if missing:
+            await send_message(
+                message, f"Missing required field(s): {', '.join(missing)}"
+            )
+            await update_buttons(pre_message, "nzbserver")
+            return
+        if not isinstance(value.get("port"), int) or value["port"] < 0:
+            await send_message(message, "port must be a positive integer!")
+            await update_buttons(pre_message, "nzbserver")
+            return
+        if not isinstance(value.get("connections"), int) or value["connections"] < 0:
+            await send_message(message, "connections must be a positive integer!")
+            await update_buttons(pre_message, "nzbserver")
+            return
+        if value.get("port") <= 0:
+            await send_message(message, "port must be greater than 0!")
+            await update_buttons(pre_message, "nzbserver")
+            return
+        if value.get("connections") <= 0:
+            await send_message(message, "connections must be greater than 0!")
+            await update_buttons(pre_message, "nzbserver")
+            return
+        res = await sabnzbd_client.add_server(value)
+        if not isinstance(res, dict) or not res.get("config", {}).get("servers", [{}])[
+            0
+        ].get("host"):
+            await send_message(message, "Invalid server!")
+            await update_buttons(pre_message, "nzbserver")
+            return
+        Config.USENET_SERVERS.append(value)
+        await update_buttons(pre_message, "nzbserver")
     else:
+        servers = (
+            Config.USENET_SERVERS if isinstance(Config.USENET_SERVERS, list) else []
+        )
+        if (
+            not servers
+            or index >= len(servers)
+            or not isinstance(servers[index], dict)
+            or key not in servers[index]
+        ):
+            await send_message(message, "Invalid server or key!")
+            await update_buttons(pre_message, "nzbserver")
+            return
         if value.isdigit():
             value = int(value)
+        if key in ("port", "connections") and (
+            not isinstance(value, int) or value <= 0
+        ):
+            await send_message(message, f"{key} must be a positive integer!")
+            await update_buttons(pre_message, f"nzbser{index}")
+            return
+        if key in ("timeout", "retention", "priority") and not isinstance(value, int):
+            await send_message(message, f"{key} must be an integer!")
+            await update_buttons(pre_message, f"nzbser{index}")
+            return
         res = await sabnzbd_client.add_server(
-            {"name": Config.USENET_SERVERS[index]["name"], key: value}
+            {"name": servers[index]["name"], key: value}
         )
-        if res["config"]["servers"][0][key] == "":
+        if not isinstance(res, dict) or not res.get("config", {}).get("servers", [{}])[
+            0
+        ].get(key):
             await send_message(message, "Invalid value")
             return
-        Config.USENET_SERVERS[index][key] = value
+        servers[index][key] = value
         await update_buttons(pre_message, f"nzbser{index}")
     await delete_message(message)
     await database.update_config({"USENET_SERVERS": Config.USENET_SERVERS})
@@ -757,9 +928,7 @@ async def sync_jdownloader():
         await jdownloader.device.system.exit_jd()
     if await aiopath.exists("cfg.zip"):
         await remove("cfg.zip")
-    await (
-        await create_subprocess_exec("7z", "a", "cfg.zip", "/JDownloader/cfg")
-    ).wait()
+    await cmd_exec(["7z", "a", "cfg.zip", "/JDownloader/cfg"])
     await database.update_private_file("cfg.zip")
 
 
@@ -783,11 +952,9 @@ async def update_private_file(_, message, pre_message, key, new_file=False):
                 Config.USE_SERVICE_ACCOUNTS = False
                 await database.update_config({"USE_SERVICE_ACCOUNTS": False})
             elif file_name in [".netrc", "netrc"]:
-                await (await create_subprocess_exec("touch", ".netrc")).wait()
-                await (await create_subprocess_exec("chmod", "600", ".netrc")).wait()
-                await (
-                    await create_subprocess_exec("cp", ".netrc", "/root/.netrc")
-                ).wait()
+                await cmd_exec(["touch", ".netrc"])
+                await cmd_exec(["chmod", "600", ".netrc"])
+                await cmd_exec(["cp", ".netrc", "/root/.netrc"])
         await delete_message(message)
     elif doc := message.document:
         file_name = doc.file_name
@@ -800,26 +967,24 @@ async def update_private_file(_, message, pre_message, key, new_file=False):
                 await rmtree("accounts", ignore_errors=True)
             if await aiopath.exists("rclone_sa"):
                 await rmtree("rclone_sa", ignore_errors=True)
-            await (
-                await create_subprocess_exec(
-                    "7z", "x", "-o.", "-aoa", "accounts.zip", "accounts/*.json"
-                )
-            ).wait()
-            await (
-                await create_subprocess_exec("chmod", "-R", "777", "accounts")
-            ).wait()
+            await cmd_exec(
+                ["7z", "x", "-o.", "-aoa", "accounts.zip", "accounts/*.json"]
+            )
+            await cmd_exec(["chmod", "-R", "777", "accounts"])
         elif file_name in [".netrc", "netrc"]:
             if file_name == "netrc":
                 await rename("netrc", ".netrc")
                 file_name = ".netrc"
-            await (await create_subprocess_exec("chmod", "600", ".netrc")).wait()
-            await (await create_subprocess_exec("cp", ".netrc", "/root/.netrc")).wait()
+            await cmd_exec(["chmod", "600", ".netrc"])
+            await cmd_exec(["cp", ".netrc", "/root/.netrc"])
         elif file_name == "config.py":
             await load_config()
         if "@github.com" in Config.UPSTREAM_REPO:
             buttons = ButtonMaker()
             msg = "Push to UPSTREAM_REPO ?"
-            buttons.data_button("Yes!", f"botset push {file_name}", style=ButtonStyle.SUCCESS)
+            buttons.data_button(
+                "Yes!", f"botset push {file_name}", style=ButtonStyle.SUCCESS
+            )
             buttons.data_button("No", "botset close", style=ButtonStyle.DANGER)
             await send_message(message, msg, buttons.build_menu(2))
         else:
@@ -851,6 +1016,23 @@ async def update_private_file(_, message, pre_message, key, new_file=False):
                 temp = line.strip().split()
                 if len(temp) == 2:
                     shortener_dict[temp[0]] = temp[1]
+    elif file_name == "categories.txt" and await aiopath.exists("categories.txt"):
+        categories_dict.clear()
+        if Config.GDRIVE_ID:
+            categories_dict["Root"] = {
+                "drive_id": Config.GDRIVE_ID,
+                "index_link": Config.INDEX_URL,
+            }
+        async with aiopen("categories.txt", "r+") as f:
+            lines = await f.readlines()
+            for line in lines:
+                sep = 2 if line.strip().split()[-1].startswith("http") else 1
+                temp = line.strip().rsplit(maxsplit=sep)
+                name = "Root Custom" if temp[0].casefold() == "Root" else temp[0]
+                categories_dict[name] = {
+                    "drive_id": temp[1],
+                    "index_link": (temp[2] if sep == 2 else ""),
+                }
     await update_buttons(pre_message, key)
     await database.update_private_file(file_name)
 
@@ -911,13 +1093,13 @@ async def edit_bot_settings(client, query):
             )
             return
         await query.answer(
-            "Syncronization Started. JDownloader will get restarted. It takes up to 10 sec!",
+            "Synchronization Started. JDownloader will get restarted. It takes up to 10 sec!",
             show_alert=True,
         )
         await sync_jdownloader()
-    elif data[1] in ["var", "aria", "qbit", "nzb", "nzbserver", "setonoff"] or data[1].startswith(
-        "nzbser"
-    ):
+    elif data[1] in ["var", "aria", "qbit", "nzb", "nzbserver", "setonoff"] or data[
+        1
+    ].startswith("nzbser"):
         if data[1] == "nzbserver":
             globals()["start"] = 0
         await query.answer()
@@ -925,7 +1107,15 @@ async def edit_bot_settings(client, query):
     elif data[1] == "resetvar":
         await query.answer()
         value = ""
-        if data[2] in DEFAULT_VALUES:
+        if data[2] in (
+            "IMAGES",
+            "SEARCH_PLUGINS",
+            "USENET_SERVERS",
+            "YT_TAGS",
+            "IMG_SOURCES",
+        ):
+            value = []
+        elif data[2] in DEFAULT_VALUES:
             value = DEFAULT_VALUES[data[2]]
             if (
                 data[2] == "STATUS_UPDATE_INTERVAL"
@@ -945,17 +1135,8 @@ async def edit_bot_settings(client, query):
         elif data[2] == "TORRENT_TIMEOUT":
             await TorrentManager.change_aria2_option("bt-stop-timeout", "0")
             await database.update_aria2("bt-stop-timeout", "0")
-        elif data[2] == "BASE_URL":
-            await (await create_subprocess_exec("pkill", "-9", "-f", "gunicorn")).wait()
-        elif data[2] == "BASE_URL_PORT":
-            value = 80
-            if Config.BASE_URL:
-                await (
-                    await create_subprocess_exec("pkill", "-9", "-f", "gunicorn")
-                ).wait()
-                await create_subprocess_shell(
-                    f"gunicorn -k uvicorn.workers.UvicornWorker -w 1 web.wserver:app --bind 0.0.0.0:{value}"
-                )
+        elif data[2] in ("BASE_URL", "WEB_ACCESS_PASSWORD"):
+            await cmd_exec(["pkill", "-9", "-f", "gunicorn"])
         elif data[2] == "GDRIVE_ID":
             if drives_names and drives_names[0] == "Main":
                 drives_names.pop(0)
@@ -966,11 +1147,14 @@ async def edit_bot_settings(client, query):
                 index_urls[0] = ""
         elif data[2] in ("INC_TASK_NOTIFY", "INC_TASK_RESUME"):
             await database.trunc_table("tasks")
-        elif data[2] in ["JD_EMAIL", "JD_PASS"]:
-            await create_subprocess_exec("pkill", "-9", "-f", "java")
+        elif data[2] in ("JD_EMAIL", "JD_PASS"):
+            await cmd_exec(["pkill", "-9", "-f", "java"])
         elif data[2] == "USENET_SERVERS":
-            for s in Config.USENET_SERVERS:
-                await sabnzbd_client.delete_config("servers", s["name"])
+            for s in (
+                Config.USENET_SERVERS if isinstance(Config.USENET_SERVERS, list) else []
+            ):
+                if isinstance(s, dict):
+                    await sabnzbd_client.delete_config("servers", s.get("name", ""))
         elif data[2] == "AUTHORIZED_CHATS":
             auth_chats.clear()
         elif data[2] == "SUDO_USERS":
@@ -980,16 +1164,16 @@ async def edit_bot_settings(client, query):
         if data[2] == "DATABASE_URL":
             await database.disconnect()
         await database.update_config({data[2]: value})
-        if data[2] in ["SEARCH_PLUGINS", "SEARCH_API_LINK"]:
+        if data[2] in ("SEARCH_PLUGINS", "SEARCH_API_LINK"):
             await initiate_search_tools()
-        elif data[2] in ["QUEUE_ALL", "QUEUE_DOWNLOAD", "QUEUE_UPLOAD"]:
+        elif data[2] in ("QUEUE_ALL", "QUEUE_DOWNLOAD", "QUEUE_UPLOAD"):
             await start_from_queued()
-        elif data[2] in [
+        elif data[2] in (
             "RCLONE_SERVE_URL",
             "RCLONE_SERVE_PORT",
             "RCLONE_SERVE_USER",
             "RCLONE_SERVE_PASS",
-        ]:
+        ):
             await rclone_serve_booter()
     elif data[1] == "resetnzb":
         await query.answer()
@@ -1000,17 +1184,17 @@ async def edit_bot_settings(client, query):
     elif data[1] == "syncnzb":
         if not Config.USENET_SERVERS:
             return await query.answer(
-                "Syncronization Paused. No USENET_SERVERS is provided !"
+                "Synchronization Paused. No USENET_SERVERS is provided !"
             )
         await query.answer(
-            "Syncronization Started. It takes up to 2 sec!", show_alert=True
+            "Synchronization Started. It takes up to 2 sec!", show_alert=True
         )
         nzb_options.clear()
         await update_nzb_options()
         await database.update_nzb_config()
     elif data[1] == "syncqbit":
         await query.answer(
-            "Syncronization Started. It takes up to 2 sec!", show_alert=True
+            "Synchronization Started. It takes up to 2 sec!", show_alert=True
         )
         qbit_options.clear()
         await update_qb_options()
@@ -1023,7 +1207,7 @@ async def edit_bot_settings(client, query):
         await database.update_aria2(data[2], "")
     elif data[1] == "emptyqbit":
         await query.answer()
-        await TorrentManager.qbittorrent.app.set_preferences({data[2]: value})
+        await TorrentManager.qbittorrent.app.set_preferences({data[2]: ""})
         qbit_options[data[2]] = ""
         await update_buttons(message, "qbit")
         await database.update_qbittorrent(data[2], "")
@@ -1035,9 +1219,13 @@ async def edit_bot_settings(client, query):
         await database.update_nzb_config()
     elif data[1] == "remser":
         index = int(data[2])
-        await sabnzbd_client.delete_config(
-            "servers", Config.USENET_SERVERS[index]["name"]
+        servers = (
+            Config.USENET_SERVERS if isinstance(Config.USENET_SERVERS, list) else []
         )
+        if index >= len(servers) or not isinstance(servers[index], dict):
+            await query.answer("Invalid server!", show_alert=True)
+            return
+        await sabnzbd_client.delete_config("servers", servers[index].get("name", ""))
         del Config.USENET_SERVERS[index]
         await update_buttons(message, "nzbserver")
         await database.update_config({"USENET_SERVERS": Config.USENET_SERVERS})
@@ -1134,22 +1322,44 @@ async def edit_bot_settings(client, query):
         await query.answer()
         await update_buttons(message, f"nzbser{data[2]}")
         index = int(data[2])
-        res = await sabnzbd_client.add_server(
-            {"name": Config.USENET_SERVERS[index]["name"], data[3]: ""}
+        servers = (
+            Config.USENET_SERVERS if isinstance(Config.USENET_SERVERS, list) else []
         )
-        Config.USENET_SERVERS[index][data[3]] = res["config"]["servers"][0][data[3]]
-        await database.update_config({"USENET_SERVERS": Config.USENET_SERVERS})
+        if index >= len(servers) or not isinstance(servers[index], dict):
+            return
+        res = await sabnzbd_client.add_server(
+            {"name": servers[index].get("name", ""), data[3]: ""}
+        )
+        if (
+            isinstance(res, dict)
+            and res.get("config", {}).get("servers", [{}])[0].get(data[3]) is not None
+        ):
+            Config.USENET_SERVERS[index][data[3]] = res["config"]["servers"][0][data[3]]
+            await database.update_config({"USENET_SERVERS": Config.USENET_SERVERS})
     elif data[1].startswith("nzbsevar") and (state == "edit" or data[2] == "newser"):
         index = 0 if data[2] == "newser" else int(data[1].replace("nzbsevar", ""))
         await query.answer()
         await update_buttons(message, data[2], data[1])
         pfunc = partial(edit_nzb_server, pre_message=message, key=data[2], index=index)
-        LOGGER.info(f"Query Data: {data[1]}")
-        rfunc = partial(update_buttons, message, data[1])
+        rfunc = partial(
+            update_buttons,
+            message,
+            "nzbserver" if data[2] == "newser" else f"nzbser{index}",
+        )
         await event_handler(client, query, pfunc, rfunc)
     elif data[1].startswith("nzbsevar") and state == "view":
         index = int(data[1].replace("nzbsevar", ""))
-        value = f"{Config.USENET_SERVERS[index][data[2]]}"
+        servers = (
+            Config.USENET_SERVERS if isinstance(Config.USENET_SERVERS, list) else []
+        )
+        if (
+            index >= len(servers)
+            or not isinstance(servers[index], dict)
+            or data[2] not in servers[index]
+        ):
+            await query.answer("Invalid server or key!", show_alert=True)
+            return
+        value = f"{servers[index][data[2]]}"
         if len(value) > 200:
             await query.answer()
             with BytesIO(str.encode(value)) as out_file:
@@ -1178,13 +1388,15 @@ async def edit_bot_settings(client, query):
         safe_filename = shlex_quote(filename)
         safe_branch = shlex_quote(Config.UPSTREAM_BRANCH)
         if await aiopath.exists(filename):
-            await (await create_subprocess_shell(f"git add -f {safe_filename} \
-                    && git commit -sm botsettings -q \
-                    && git push origin {safe_branch} -qf")).wait()
+            await cmd_exec(
+                f"git add -f {safe_filename} && git commit -sm botsettings -q && git push origin {safe_branch} -qf",
+                shell=True,
+            )
         else:
-            await (await create_subprocess_shell(f"git rm -r --cached {safe_filename} \
-                    && git commit -sm botsettings -q \
-                    && git push origin {safe_branch} -qf")).wait()
+            await cmd_exec(
+                f"git rm -r --cached {safe_filename} && git commit -sm botsettings -q && git push origin {safe_branch} -qf",
+                shell=True,
+            )
         await delete_message(message.reply_to_message)
         await delete_message(message)
 
@@ -1198,6 +1410,11 @@ async def send_bot_settings(_, message):
 
 
 async def load_config():
+    import importlib
+    import sys
+
+    if "config" in sys.modules:
+        importlib.reload(sys.modules["config"])
     Config.load()
     drives_ids.clear()
     drives_names.clear()
@@ -1223,16 +1440,63 @@ async def load_config():
     if not Config.INC_TASK_NOTIFY and not Config.INC_TASK_RESUME:
         await database.trunc_table("tasks")
 
-    await (await create_subprocess_exec("pkill", "-9", "-f", "gunicorn")).wait()
+    await cmd_exec(["pkill", "-9", "-f", "gunicorn"])
     if Config.BASE_URL:
-        await create_subprocess_shell(
-            f"gunicorn -k uvicorn.workers.UvicornWorker -w 1 web.wserver:app --bind 0.0.0.0:{Config.BASE_URL_PORT}"
+        port = getenv("PORT", "") or "8080"
+        access_pwd = getenv("WEB_ACCESS_PASSWORD", "") or Config.WEB_ACCESS_PASSWORD
+        if not access_pwd:
+            from secrets import token_bytes
+
+            access_pwd = token_bytes(32).hex()
+            Config.WEB_ACCESS_PASSWORD = access_pwd
+        env = f"WEB_ACCESS_PASSWORD={access_pwd} "
+        bot_loop.create_task(
+            cmd_exec(
+                f"{env}gunicorn -k uvicorn.workers.UvicornWorker -w 1 web.wserver:app --bind 0.0.0.0:{port}",
+                shell=True,
+            )
         )
 
     if Config.DATABASE_URL:
         await database.connect()
-        config_dict = Config.get_all()
-        await database.update_config(config_dict)
+
+        from os import environ
+
+        settings = sys.modules.get("config")
+        config_file = {}
+        if settings:
+            config_file = {
+                k: v.strip() if isinstance(v, str) else v
+                for k, v in vars(settings).items()
+                if not k.startswith("__")
+            }
+        config_file.update({k: environ[k].strip() for k in var_list if k in environ})
+
+        part = db_partition_id((Config.BOT_TOKEN or "").split(":", 1)[0])
+        deploy_filter = {"_id": part}
+
+        old_config = await database.db.settings.deployConfig.find_one(
+            deploy_filter, {"_id": 0}
+        )
+        db_config = (
+            await database.db.settings.config.find_one(deploy_filter, {"_id": 0}) or {}
+        )
+
+        if old_config is None:
+            for k, v in config_file.items():
+                if v is not None:
+                    db_config.setdefault(k, v)
+        elif old_config != config_file:
+            for k, v in config_file.items():
+                if k not in old_config or old_config.get(k) != v:
+                    if v is not None:
+                        db_config[k] = v
+
+        Config.load_dict(db_config)
+        await database.db.settings.deployConfig.replace_one(
+            deploy_filter, config_file, upsert=True
+        )
+        await database.update_config(Config.get_all())
     else:
         await database.disconnect()
     await gather(initiate_search_tools(), start_from_queued(), rclone_serve_booter())

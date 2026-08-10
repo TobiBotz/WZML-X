@@ -122,6 +122,7 @@ class Mirror(TaskListener):
             "-m": "",
             "-meta": "",
             "-up": "",
+            "-gc": "",
             "-rcf": "",
             "-au": "",
             "-ap": "",
@@ -162,6 +163,7 @@ class Mirror(TaskListener):
         self.seed = args["-d"]
         self.name = args["-n"]
         self.up_dest = args["-up"]
+        self.category = args["-gc"]
         self.rc_flags = args["-rcf"]
         self.link = args["link"]
         self.compress = args["-z"]
@@ -414,8 +416,6 @@ class Mirror(TaskListener):
                     await delete_links(self.message)
                     return
 
-        await delete_links(self.message)
-
         if file_ is not None:
             await TelegramDownloadHelper(self).add_download(
                 reply_to, f"{path}/", session
@@ -454,10 +454,16 @@ async def qb_mirror(client, message):
 
 
 async def jd_mirror(client, message):
+    if Config.DISABLE_JD:
+        await message.reply("JDownloader is currently disabled by the Bot Owner.")
+        return
     bot_loop.create_task(Mirror(client, message, is_jd=True).new_event())
 
 
 async def nzb_mirror(client, message):
+    if Config.DISABLE_NZB:
+        await message.reply("SABnzbd is currently disabled by the Bot Owner.")
+        return
     text_parts = message.text.split()
     nzb_id = None
     if len(text_parts) > 1 and not text_parts[1].startswith(("http", "ftp", "/")):
@@ -491,10 +497,16 @@ async def qb_leech(client, message):
 
 
 async def jd_leech(client, message):
+    if Config.DISABLE_JD:
+        await message.reply("JDownloader is currently disabled by the Bot Owner.")
+        return
     bot_loop.create_task(Mirror(client, message, is_leech=True, is_jd=True).new_event())
 
 
 async def nzb_leech(client, message):
+    if Config.DISABLE_NZB:
+        await message.reply("SABnzbd is currently disabled by the Bot Owner.")
+        return
     text_parts = message.text.split()
     nzb_id = None
     if len(text_parts) > 1 and not text_parts[1].startswith(("http", "ftp", "/")):

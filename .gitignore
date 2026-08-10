@@ -5,6 +5,7 @@ credentials.json
 rclone.conf
 .netrc
 log.txt
+rlog.txt
 cfg.zip
 accounts/*
 thumbnails/*
@@ -12,9 +13,9 @@ rclone/*
 tokens/*
 cookies/*
 mediainfo/*
-sabnzbd/*
 list_drives.txt
 shortener.txt
+categories.txt
 cookies.txt
 downloads/*
 .github/instructions/*
@@ -23,4 +24,5 @@ downloads/*
 graphify-out/*
 .graphify_*
 .agent*
+AGENTS.md
 __pycache__/
